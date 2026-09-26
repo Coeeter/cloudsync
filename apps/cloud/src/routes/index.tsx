@@ -82,8 +82,8 @@ import {
   registry,
   renameEntryAtom,
   renameValueAtom,
-  searchResultsAtom,
   searchLoadingAtom,
+  searchResultsAtom,
   searchTruncatedAtom,
   uploadProgressAtom,
   viewAtom,
@@ -621,7 +621,7 @@ function EntryCard({
   const [broken, setBroken] = useState(false)
   const fallback =
     entry.kind === "directory" ? (
-      <Folder className="text-foreground opacity-[0.68]" size={52} strokeWidth={1.25} />
+      <Folder className="text-amber-300" size={52} strokeWidth={1.25} />
     ) : entry.previewKind === "image" ? (
       <ImageIcon className="text-[#6c727d]" size={40} strokeWidth={1.2} />
     ) : entry.previewKind === "video" ? (
@@ -651,7 +651,7 @@ function EntryCard({
         <div
           className={
             entry.kind === "directory"
-              ? "relative grid aspect-square place-items-center overflow-hidden rounded-lg border border-[rgba(243,241,235,0.18)] bg-card p-2 before:absolute before:top-0 before:right-0 before:z-[2] before:h-[13%] before:w-[36%] before:origin-top-right before:translate-x-2 before:skew-x-[-24deg] before:border-b before:border-l before:border-[rgba(243,241,235,0.16)] before:bg-background group-focus-visible:ring-2 group-focus-visible:ring-ring"
+              ? "relative grid aspect-square place-items-center overflow-hidden rounded-lg border border-amber-300/40 bg-amber-950/20 p-2 ring-1 ring-amber-300/10 ring-inset before:absolute before:top-0 before:right-0 before:z-[2] before:h-[13%] before:w-[36%] before:origin-top-right before:translate-x-2 before:skew-x-[-24deg] before:border-b before:border-l before:border-amber-300/40 before:bg-amber-950 group-focus-visible:ring-2 group-focus-visible:ring-amber-300"
               : "relative grid aspect-square place-items-center overflow-hidden rounded-lg border border-border bg-[#111317] group-focus-visible:ring-2 group-focus-visible:ring-ring"
           }
         >
@@ -676,6 +676,11 @@ function EntryCard({
               <Video size={12} />
             </span>
           ) : null}
+          {entry.kind === "directory" ? (
+            <span className="absolute bottom-2 left-2 flex items-center gap-1 rounded-md bg-amber-300 px-2 py-1 text-xs font-semibold text-amber-950 shadow-sm">
+              <Folder size={13} fill="currentColor" /> Folder
+            </span>
+          ) : null}
           {entry.kind === "file" &&
           entry.previewStatus !== "ready" &&
           entry.previewKind !== "none" ? (
@@ -691,7 +696,9 @@ function EntryCard({
           ) : null}
         </div>
         <div className="grid gap-0.5 pt-2 pr-8 pl-0.5">
-          <span className="overflow-hidden text-sm font-medium text-ellipsis whitespace-nowrap">
+          <span
+            className={`overflow-hidden text-sm font-medium text-ellipsis whitespace-nowrap ${entry.kind === "directory" ? "text-amber-100" : ""}`}
+          >
             {entry.name}
           </span>
           {searchPath ? (
@@ -1035,24 +1042,28 @@ function Lightbox({ entry, entries }: { entry: Entry | null; entries: ReadonlyAr
 function LightboxMedia({ entry }: { entry: Entry }) {
   if (entry.previewKind === "video" && entry.contentUrl) {
     return (
-      // biome-ignore lint/a11y/useMediaCaption: personal archive media has no caption tracks
-      <video
-        className="absolute inset-x-4 top-16 bottom-4 size-auto object-contain max-sm:inset-x-0 max-sm:top-16 max-sm:bottom-0"
-        src={entry.contentUrl}
-        poster={entry.previewUrl ?? undefined}
-        controls
-        playsInline
-        autoPlay
-      />
+      <div className="absolute inset-x-4 top-16 bottom-4 flex items-center justify-center max-sm:inset-x-0 max-sm:bottom-0">
+        {/* biome-ignore lint/a11y/useMediaCaption: personal archive media has no caption tracks */}
+        <video
+          className="max-h-full max-w-full object-contain"
+          src={entry.contentUrl}
+          poster={entry.previewUrl ?? undefined}
+          controls
+          playsInline
+          autoPlay
+        />
+      </div>
     )
   }
   if (entry.previewKind === "pdf" && entry.contentUrl) {
     return (
-      <iframe
-        className="absolute inset-x-4 top-16 bottom-4 size-auto rounded-md border-0 bg-foreground object-contain max-sm:inset-x-0 max-sm:bottom-0"
-        src={entry.contentUrl}
-        title={entry.name}
-      />
+      <div className="absolute inset-x-4 top-16 bottom-4 max-sm:inset-x-0 max-sm:bottom-0">
+        <iframe
+          className="size-full rounded-md border-0 bg-foreground"
+          src={entry.contentUrl}
+          title={entry.name}
+        />
+      </div>
     )
   }
   // Generated previews are static WebP. Unknown WebP uses the original until classified so an
@@ -1063,12 +1074,14 @@ function LightboxMedia({ entry }: { entry: Entry }) {
   const src = originalImage ? entry.contentUrl : (entry.previewUrl ?? entry.contentUrl)
   if (entry.previewKind === "image" && src) {
     return (
-      <img
-        className="absolute inset-x-4 top-16 bottom-4 size-auto object-contain max-sm:inset-x-0 max-sm:bottom-0"
-        src={src}
-        alt={entry.name}
-        draggable={false}
-      />
+      <div className="absolute inset-x-4 top-16 bottom-4 flex items-center justify-center max-sm:inset-x-0 max-sm:bottom-0">
+        <img
+          className="max-h-full max-w-full object-contain"
+          src={src}
+          alt={entry.name}
+          draggable={false}
+        />
+      </div>
     )
   }
   return (
