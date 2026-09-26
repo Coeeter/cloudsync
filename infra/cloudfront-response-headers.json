@@ -1,0 +1,14 @@
+{
+  "Name": "cloudsync-immutable-private",
+  "Comment": "CloudSync object keys are immutable; allow long private browser caching",
+  "CustomHeadersConfig": {
+    "Quantity": 1,
+    "Items": [
+      {
+        "Header": "Cache-Control",
+        "Value": "private, max-age=31536000, immutable",
+        "Override": true
+      }
+    ]
+  }
+}

@@ -168,18 +168,26 @@ export class Storage extends Context.Service<Storage, StorageShape>()("@cloudsyn
           .map(encodeURIComponent)
           .join("/")}`
 
+      // Snapping expiry to a fixed window keeps each object's signed URL identical across
+      // listings, so browsers reuse cached images instead of refetching on every render.
+      const viewExpiry = () => {
+        const window = VIEW_TTL_SECONDS * 1000
+        return new Date(Math.ceil((Date.now() + window) / window) * window)
+      }
+
       const viewUrl: StorageShape["viewUrl"] = Effect.fn("Storage.viewUrl")(function* (objectKey) {
         if (signing._tag === "Signed") {
           return getCloudFrontSignedUrl({
             url: publicObjectUrl(objectKey),
             keyPairId: signing.keyPairId,
             privateKey: Redacted.value(signing.privateKeyPem),
-            dateLessThan: new Date(Date.now() + VIEW_TTL_SECONDS * 1000).toISOString(),
+            dateLessThan: viewExpiry().toISOString(),
           })
         }
         return yield* send("viewUrl", () =>
           getSignedUrl(client, new GetObjectCommand({ Bucket: config.s3Bucket, Key: objectKey }), {
-            expiresIn: VIEW_TTL_SECONDS,
+            expiresIn: 2 * VIEW_TTL_SECONDS,
+            signingDate: new Date(viewExpiry().getTime() - 2 * VIEW_TTL_SECONDS * 1000),
           }),
         )
       })

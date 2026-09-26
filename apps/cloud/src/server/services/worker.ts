@@ -225,8 +225,10 @@ export class Worker extends Context.Service<Worker, WorkerShape>()("@cloudsync/c
               .bytes(),
           catch: (cause) => new WorkerJobError({ message: "Could not render the preview", cause }),
         })
-        const thumbnailKey = `previews/${entry.id}/thumbnail.webp`
-        const previewKey = `previews/${entry.id}/preview.webp`
+        // A fresh key per generation lets delivery mark previews immutable.
+        const generation = crypto.randomUUID()
+        const thumbnailKey = `previews/${entry.id}/${generation}-thumbnail.webp`
+        const previewKey = `previews/${entry.id}/${generation}-preview.webp`
         yield* Effect.all(
           [
             storage.put(thumbnailKey, thumbnail, "image/webp"),
@@ -234,11 +236,21 @@ export class Worker extends Context.Service<Worker, WorkerShape>()("@cloudsync/c
           ],
           { concurrency: 2 },
         )
+        const replaced = [entry.thumbnailKey, entry.previewKey].filter(
+          (key): key is string => key !== null,
+        )
         yield* database.execute("worker.savePreview", (db) =>
-          db
-            .update(schema.entries)
-            .set({ thumbnailKey, previewKey, previewError: null, updatedAt: new Date() })
-            .where(eq(schema.entries.id, entry.id)),
+          db.transaction(async (tx) => {
+            await tx
+              .update(schema.entries)
+              .set({ thumbnailKey, previewKey, previewError: null, updatedAt: new Date() })
+              .where(eq(schema.entries.id, entry.id))
+            if (replaced.length > 0) {
+              await tx
+                .insert(schema.jobs)
+                .values({ kind: "delete_objects", payload: { objectKeys: replaced } })
+            }
+          }),
         )
       })
 
