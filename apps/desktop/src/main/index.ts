@@ -228,9 +228,13 @@ async function bootstrap() {
   registerIpc()
   await runtime.runPromise(Effect.map(Inbox, (inbox) => inbox.subscribe(() => void publish())))
 
-  const icon = nativeImage.createFromNamedImage("NSImageNameShareTemplate")
-  icon.setTemplateImage(true)
-  tray = new Tray(icon.resize({ width: 18, height: 18 }))
+  const resources = app.isPackaged
+    ? process.resourcesPath
+    : join(import.meta.dirname, "../../resources")
+  const trayIcon = nativeImage.createFromPath(join(resources, "trayTemplate.png"))
+  trayIcon.setTemplateImage(true)
+  tray = new Tray(trayIcon)
+  if (!app.isPackaged) app.dock?.setIcon(join(import.meta.dirname, "../../build/icon.png"))
   tray.on("click", () => tray?.popUpContextMenu())
 
   await showWindow()

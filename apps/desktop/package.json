@@ -1,6 +1,9 @@
 {
   "name": "@cloudsync/desktop",
   "private": true,
+  "version": "1.0.0",
+  "description": "Drains a watched folder into your private CloudSync archive",
+  "author": "Nas <nasrullah01n@gmail.com>",
   "type": "module",
   "imports": {
     "#components/*": "./src/renderer/src/components/*.tsx",
@@ -42,7 +45,8 @@
     "appId": "dev.nasnoor.cloudsync",
     "productName": "CloudSync",
     "directories": {
-      "output": "dist"
+      "output": "dist",
+      "buildResources": "build"
     },
     "files": [
       "out/**/*",
@@ -57,8 +61,18 @@
             "arm64"
           ]
         }
-      ]
+      ],
+      "icon": "build/icon.png"
     },
-    "asar": true
+    "asar": true,
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": ".",
+        "filter": [
+          "trayTemplate*.png"
+        ]
+      }
+    ]
   }
 }
