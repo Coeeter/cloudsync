@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm"
 import {
   bigint,
+  boolean,
   index,
   integer,
   jsonb,
@@ -33,6 +34,7 @@ export const entries = pgTable(
     thumbnailKey: text("thumbnail_key"),
     previewKey: text("preview_key"),
     previewError: text("preview_error"),
+    isAnimated: boolean("is_animated"),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
     originalParentId: uuid("original_parent_id"),
     trashRootId: uuid("trash_root_id"),

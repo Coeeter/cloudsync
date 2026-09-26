@@ -7,6 +7,9 @@ export type EntryKind = typeof EntryKind.Type
 export const PreviewKind = Schema.Literals(["image", "video", "pdf", "none"])
 export type PreviewKind = typeof PreviewKind.Type
 
+export const PreviewStatus = Schema.Literals(["pending", "ready", "failed", "none"])
+export type PreviewStatus = typeof PreviewStatus.Type
+
 export class Entry extends Schema.Class<Entry>("Entry")({
   id: Schema.String,
   parentId: Schema.NullOr(Schema.String),
@@ -16,10 +19,22 @@ export class Entry extends Schema.Class<Entry>("Entry")({
   size: Schema.Finite,
   updatedAt: Schema.String,
   previewKind: PreviewKind,
+  previewStatus: PreviewStatus,
+  isAnimated: Schema.NullOr(Schema.Boolean),
   thumbnailUrl: Schema.NullOr(Schema.String),
   previewUrl: Schema.NullOr(Schema.String),
   contentUrl: Schema.NullOr(Schema.String),
   childCount: Schema.Finite,
+}) {}
+
+export class SearchResult extends Schema.Class<SearchResult>("SearchResult")({
+  entry: Entry,
+  parentPath: Schema.String,
+}) {}
+
+export class SearchResponse extends Schema.Class<SearchResponse>("SearchResponse")({
+  results: Schema.Array(SearchResult),
+  truncated: Schema.Boolean,
 }) {}
 
 export class Breadcrumb extends Schema.Class<Breadcrumb>("Breadcrumb")({
@@ -104,7 +119,12 @@ export const CloudSyncRpcs = RpcGroup.make(
   }),
   Rpc.make("catalog.search", {
     payload: { ...SessionPayload, query: Schema.String, limit: Schema.optional(Schema.Finite) },
-    success: Schema.Array(Entry),
+    success: SearchResponse,
+    error: CloudSyncError,
+  }),
+  Rpc.make("catalog.retryPreview", {
+    payload: { ...SessionPayload, id: Schema.String },
+    success: Ok,
     error: CloudSyncError,
   }),
   Rpc.make("catalog.createFolder", {

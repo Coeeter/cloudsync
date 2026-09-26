@@ -242,6 +242,31 @@
   font-size: 10px;
 }
 
+.entry-path {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-state {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  padding: 4px 6px;
+  border: 1px solid rgba(243, 241, 235, 0.14);
+  border-radius: 5px;
+  background: rgba(11, 12, 14, 0.82);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.preview-state[data-state="failed"] {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  color: var(--danger);
+}
+
 .entry-badge {
   position: absolute;
   right: 7px;

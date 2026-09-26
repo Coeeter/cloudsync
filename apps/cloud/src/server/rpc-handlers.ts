@@ -59,6 +59,8 @@ export const rpcHandlers = Effect.gen(function* () {
       protect(sessionToken, options.headers, catalog.list(parentId, { cursor, limit, trashed })),
     "catalog.search": ({ sessionToken, query, limit }, options) =>
       protect(sessionToken, options.headers, catalog.search(query, limit)),
+    "catalog.retryPreview": ({ sessionToken, id }, options) =>
+      protect(sessionToken, options.headers, catalog.retryPreview(id)),
     "catalog.createFolder": ({ sessionToken, parentId, name }, options) =>
       protect(sessionToken, options.headers, catalog.createFolder(parentId, name)),
     "catalog.rename": ({ sessionToken, id, name }, options) =>

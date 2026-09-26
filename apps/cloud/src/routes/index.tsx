@@ -76,23 +76,37 @@ import {
   noticeAtom,
   pendingDeleteAtom,
   queryAtom,
+  recycleEntriesAtom,
   recycleListingAtom,
   registry,
   renameEntryAtom,
   renameValueAtom,
   searchResultsAtom,
+  searchLoadingAtom,
+  searchTruncatedAtom,
   uploadProgressAtom,
   viewAtom,
 } from "../client/state"
 import { useAtomValue } from "../client/use-atom"
 
-export const Route = createFileRoute("/")({ component: CloudSyncApp })
+export const Route = createFileRoute("/")({
+  validateSearch: (search: Record<string, unknown>) => ({
+    folder: typeof search.folder === "string" && search.folder ? search.folder : undefined,
+    recycle: search.recycle === true || search.recycle === "true" ? true : undefined,
+  }),
+  component: CloudSyncApp,
+})
 
 function CloudSyncApp() {
   const authView = useAtomValue(authViewAtom)
+  const location = Route.useSearch()
+  const initialLocation = useRef(location)
 
   useEffect(() => {
-    void actions.boot()
+    void actions.boot(
+      initialLocation.current.folder ?? null,
+      initialLocation.current.recycle === true,
+    )
   }, [])
 
   if (authView !== "authenticated") return <AuthScreen view={authView} />
@@ -196,9 +210,14 @@ function AuthScreen({ view }: { view: "checking" | "email" | "pin" }) {
 }
 
 function FileBrowser() {
+  const location = Route.useSearch()
+  const navigate = Route.useNavigate()
   const listing = useAtomValue(listingAtom)
   const query = useAtomValue(queryAtom)
   const searchResults = useAtomValue(searchResultsAtom)
+  const searchLoading = useAtomValue(searchLoadingAtom)
+  const searchTruncated = useAtomValue(searchTruncatedAtom)
+  const recycleEntries = useAtomValue(recycleEntriesAtom)
   const error = useAtomValue(errorAtom)
   const progress = useAtomValue(uploadProgressAtom)
   const dragActive = useAtomValue(dragActiveAtom)
@@ -217,10 +236,18 @@ function FileBrowser() {
   const folderInput = useRef<HTMLInputElement>(null)
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const dragDepth = useRef(0)
+  const routeFolder = location.folder ?? null
+  const navigateFolder = (folder: string | null, recycle = location.recycle === true) =>
+    navigate({
+      search: {
+        folder: folder ?? undefined,
+        recycle: recycle ? true : undefined,
+      },
+    })
 
   const onSearch = (event: ChangeEvent<HTMLInputElement>) => {
     const value = event.target.value
-    registry.set(queryAtom, value)
+    actions.setSearchQuery(value)
     if (searchTimer.current) clearTimeout(searchTimer.current)
     searchTimer.current = setTimeout(() => void actions.search(value), 180)
   }
@@ -260,10 +287,13 @@ function FileBrowser() {
   const searching = view === "files" && query.trim().length > 0
   const entries =
     view === "recycle"
-      ? (recycleListing?.entries ?? searchResults)
+      ? (recycleListing?.entries ?? recycleEntries)
       : searching
-        ? searchResults
+        ? searchResults.map((result) => result.entry)
         : (listing?.entries ?? [])
+  const searchPathById = new Map(
+    searchResults.map((result) => [result.entry.id, result.parentPath]),
+  )
   const recycleMode = view === "recycle" ? (recycleListing ? "nested" : "root") : null
   const hasMore = view === "files" && !searching && Boolean(listing?.nextCursor)
 
@@ -283,6 +313,32 @@ function FileBrowser() {
     return () => observer.disconnect()
   }, [hasMore, listing?.nextCursor])
 
+  useEffect(() => {
+    const refresh = () => {
+      if (!document.hidden) actions.refreshPendingPreviews()
+    }
+    window.addEventListener("focus", refresh)
+    document.addEventListener("visibilitychange", refresh)
+    return () => {
+      window.removeEventListener("focus", refresh)
+      document.removeEventListener("visibilitychange", refresh)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (location.recycle) {
+      const current = recycleListing?.directory?.id ?? null
+      if (view !== "recycle") {
+        void actions.showRecycleBin()
+      } else if (current !== routeFolder) {
+        void actions.openRecycleFolder(routeFolder)
+      }
+      return
+    }
+    const current = listing?.directory?.id ?? null
+    if (view !== "files" || current !== routeFolder) void actions.openDirectory(routeFolder)
+  }, [location.recycle, routeFolder, view, listing?.directory?.id, recycleListing?.directory?.id])
+
   return (
     <main
       className="app-shell"
@@ -297,7 +353,7 @@ function FileBrowser() {
         <nav className="breadcrumb" aria-label="Current folder">
           {view === "recycle" ? (
             <>
-              <button type="button" onClick={() => void actions.showFiles()}>
+              <button type="button" onClick={() => void navigateFolder(null, false)}>
                 CloudSync
               </button>
               {(recycleListing?.breadcrumbs ?? [{ id: null, name: "Recycle Bin" }]).map(
@@ -307,7 +363,7 @@ function FileBrowser() {
                     <button
                       type="button"
                       aria-current={index === crumbs.length - 1 ? "page" : undefined}
-                      onClick={() => void actions.openRecycleFolder(crumb.id)}
+                      onClick={() => void navigateFolder(crumb.id, true)}
                     >
                       {crumb.name}
                     </button>
@@ -322,7 +378,7 @@ function FileBrowser() {
                 <button
                   type="button"
                   aria-current={index === crumbs.length - 1 ? "page" : undefined}
-                  onClick={() => void actions.openDirectory(crumb.id)}
+                  onClick={() => void navigateFolder(crumb.id, false)}
                 >
                   {crumb.name}
                 </button>
@@ -388,11 +444,11 @@ function FileBrowser() {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               {view === "files" ? (
-                <DropdownMenuItem onSelect={() => void actions.showRecycleBin()}>
+                <DropdownMenuItem onSelect={() => void navigateFolder(null, true)}>
                   <Trash2 /> Recycle Bin
                 </DropdownMenuItem>
               ) : (
-                <DropdownMenuItem onSelect={() => void actions.showFiles()}>
+                <DropdownMenuItem onSelect={() => void navigateFolder(null, false)}>
                   <Folder /> Back to files
                 </DropdownMenuItem>
               )}
@@ -441,7 +497,9 @@ function FileBrowser() {
       ) : null}
       {searching ? (
         <p className="view-note">
-          {searchResults.length} result{searchResults.length === 1 ? "" : "s"} for “{query.trim()}”
+          {searchLoading
+            ? `Searching for “${query.trim()}”…`
+            : `${searchResults.length}${searchTruncated ? "+" : ""} result${searchResults.length === 1 && !searchTruncated ? "" : "s"} for “${query.trim()}”${searchTruncated ? " · showing the first 100" : ""}`}
         </p>
       ) : null}
 
@@ -451,7 +509,13 @@ function FileBrowser() {
           aria-label={searching ? "Search results" : "Folder contents"}
         >
           {entries.map((entry) => (
-            <EntryCard key={entry.id} entry={entry} recycle={recycleMode} />
+            <EntryCard
+              key={entry.id}
+              entry={entry}
+              recycle={recycleMode}
+              searchPath={searching ? searchPathById.get(entry.id) : undefined}
+              openDirectory={(id) => void navigateFolder(id, recycleMode !== null)}
+            />
           ))}
         </section>
       ) : (
@@ -468,7 +532,9 @@ function FileBrowser() {
                 : recycleMode === "nested"
                   ? "This folder is empty"
                   : searching
-                    ? "No matching files"
+                    ? searchLoading
+                      ? "Searching…"
+                      : "No matching files"
                     : listing
                       ? "Drop files here or upload a folder"
                       : "Loading…"}
@@ -495,7 +561,17 @@ function FileBrowser() {
   )
 }
 
-function EntryCard({ entry, recycle }: { entry: Entry; recycle: "root" | "nested" | null }) {
+function EntryCard({
+  entry,
+  recycle,
+  searchPath,
+  openDirectory,
+}: {
+  entry: Entry
+  recycle: "root" | "nested" | null
+  searchPath?: string
+  openDirectory: (id: string) => void
+}) {
   const [broken, setBroken] = useState(false)
   const fallback =
     entry.kind === "directory" ? (
@@ -514,8 +590,7 @@ function EntryCard({ entry, recycle }: { entry: Entry; recycle: "root" | "nested
 
   const open = () => {
     if (entry.kind === "directory") {
-      if (recycle) void actions.openRecycleFolder(entry.id)
-      else void actions.openDirectory(entry.id)
+      openDirectory(entry.id)
     } else registry.set(activeEntryAtom, entry)
   }
 
@@ -540,9 +615,17 @@ function EntryCard({ entry, recycle }: { entry: Entry; recycle: "root" | "nested
               <Video size={12} />
             </span>
           ) : null}
+          {entry.kind === "file" &&
+          entry.previewStatus !== "ready" &&
+          entry.previewKind !== "none" ? (
+            <span className="preview-state" data-state={entry.previewStatus}>
+              {entry.previewStatus === "failed" ? "Preview failed" : "Processing preview"}
+            </span>
+          ) : null}
         </div>
         <div className="entry-meta">
           <span className="entry-name">{entry.name}</span>
+          {searchPath ? <span className="entry-path">{searchPath}</span> : null}
           <span className="entry-detail">
             {entry.kind === "directory"
               ? `${entry.childCount} item${entry.childCount === 1 ? "" : "s"}`
@@ -579,9 +662,16 @@ function EntryCard({ entry, recycle }: { entry: Entry; recycle: "root" | "nested
             ) : (
               <>
                 {entry.kind === "file" ? (
-                  <DropdownMenuItem onSelect={() => void actions.download(entry.id)}>
-                    <Download /> Download
-                  </DropdownMenuItem>
+                  <>
+                    <DropdownMenuItem onSelect={() => void actions.download(entry.id)}>
+                      <Download /> Download
+                    </DropdownMenuItem>
+                    {entry.previewStatus === "failed" ? (
+                      <DropdownMenuItem onSelect={() => void actions.retryPreview(entry)}>
+                        <RotateCcw /> Retry preview
+                      </DropdownMenuItem>
+                    ) : null}
+                  </>
                 ) : (
                   <DropdownMenuItem onSelect={() => actions.downloadFolder(entry.id)}>
                     <Download /> Download ZIP
@@ -804,8 +894,16 @@ function Lightbox({ entry, entries }: { entry: Entry | null; entries: ReadonlyAr
             <DialogDescription className="lightbox-meta">
               {entry ? formatBytes(entry.size) : ""}
               {files.length > 1 && index >= 0 ? ` · ${index + 1} / ${files.length}` : ""}
+              {entry?.previewStatus === "failed" ? " · preview failed" : ""}
             </DialogDescription>
           </div>
+          {entry ? (
+            entry.previewStatus === "failed" ? (
+              <Button variant="ghost" onClick={() => void actions.retryPreview(entry)}>
+                <RotateCcw size={16} /> Retry preview
+              </Button>
+            ) : null
+          ) : null}
           {entry ? (
             <Button
               size="icon"
@@ -874,9 +972,12 @@ function LightboxMedia({ entry }: { entry: Entry }) {
       <iframe className="lightbox-media lightbox-pdf" src={entry.contentUrl} title={entry.name} />
     )
   }
-  // Generated previews are static WebP, so animated GIFs play from the original.
-  const src =
-    entry.mimeType === "image/gif" ? entry.contentUrl : (entry.previewUrl ?? entry.contentUrl)
+  // Generated previews are static WebP. Unknown WebP uses the original until classified so an
+  // existing animation never silently becomes a still image.
+  const originalImage =
+    entry.mimeType === "image/gif" ||
+    (entry.mimeType === "image/webp" && entry.isAnimated !== false)
+  const src = originalImage ? entry.contentUrl : (entry.previewUrl ?? entry.contentUrl)
   if (entry.previewKind === "image" && src) {
     return <img className="lightbox-media" src={src} alt={entry.name} draggable={false} />
   }

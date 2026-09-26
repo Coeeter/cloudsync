@@ -13,6 +13,8 @@ import {
   DownloadTicket,
   Entry,
   Ok,
+  SearchResponse,
+  SearchResult,
   UploadTicket,
 } from "@cloudsync/domain"
 import { and, eq, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm"
@@ -44,10 +46,8 @@ export interface CatalogShape {
       readonly trashed?: boolean | undefined
     },
   ) => Effect.Effect<DirectoryListing, CatalogFailure>
-  readonly search: (
-    query: string,
-    limit?: number,
-  ) => Effect.Effect<ReadonlyArray<Entry>, CatalogFailure>
+  readonly search: (query: string, limit?: number) => Effect.Effect<SearchResponse, CatalogFailure>
+  readonly retryPreview: (id: string) => Effect.Effect<Ok, CatalogFailure>
   readonly createFolder: (
     parentId: string | null,
     name: string,
@@ -315,6 +315,14 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
         const thumbnailUrl = thumbnailKey ? yield* objectUrl(thumbnailKey) : null
         const previewUrl = row.previewKey ? yield* objectUrl(row.previewKey) : null
         const previewKind = row.kind === "file" ? previewKindForMime(row.mimeType) : "none"
+        const previewStatus =
+          previewKind === "none"
+            ? "none"
+            : row.thumbnailKey && row.previewKey
+              ? "ready"
+              : row.previewError
+                ? "failed"
+                : "pending"
         const contentUrl =
           previewKind !== "none" && row.objectKey ? yield* objectUrl(row.objectKey) : null
         return Entry.make({
@@ -326,6 +334,8 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
           size: row.size,
           updatedAt: row.updatedAt.toISOString(),
           previewKind,
+          previewStatus,
+          isAnimated: row.isAnimated,
           thumbnailUrl,
           previewUrl,
           contentUrl,
@@ -428,8 +438,9 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
         limit = 100,
       ) {
         const value = query.trim()
-        if (!value) return []
-        const rows = yield* run("catalog.search", async (db) => {
+        if (!value) return SearchResponse.make({ results: [], truncated: false })
+        const pageSize = Math.min(Math.max(1, Math.floor(limit)), 200)
+        const matches = yield* run("catalog.search", async (db) => {
           const match = `%${value.replaceAll("%", "\\%").replaceAll("_", "\\_")}%`
           const result = await db.execute(sql`
             with recursive catalog_paths as (
@@ -442,19 +453,71 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
               join catalog_paths on child.parent_id = catalog_paths.id
               where child.deleted_at is null
             )
-            select id
+            select id, path
             from catalog_paths
             where name ilike ${match} escape '\\' or path ilike ${match} escape '\\'
             order by path
-            limit ${Math.min(Math.max(1, limit), 200)}
+            limit ${pageSize + 1}
           `)
-          const ids = Array.from(result as Iterable<{ id: string }>, (row) => row.id)
-          if (ids.length === 0) return []
-          return db.select().from(schema.entries).where(inArray(schema.entries.id, ids))
+          const found = Array.from(result as Iterable<{ id: string; path: string }>)
+          const visible = found.slice(0, pageSize)
+          const ids = visible.map((row) => row.id)
+          if (ids.length === 0) return { rows: [], visible, truncated: false }
+          const rows = await db.select().from(schema.entries).where(inArray(schema.entries.id, ids))
+          return { rows, visible, truncated: found.length > pageSize }
         })
-        const entries = yield* Effect.forEach(rows, (row) => toEntry(row), { concurrency: 8 })
-        return entries.sort((a, b) => naturalCompare(a.name, b.name))
+        const rowById = new Map(matches.rows.map((row) => [row.id, row]))
+        const results = yield* Effect.forEach(
+          matches.visible,
+          ({ id, path }) => {
+            const row = rowById.get(id)
+            if (!row) return Effect.succeed(null)
+            const separator = path.lastIndexOf("/")
+            return toEntry(row).pipe(
+              Effect.map((entry) =>
+                SearchResult.make({
+                  entry,
+                  parentPath: separator < 0 ? "CloudSync" : `CloudSync/${path.slice(0, separator)}`,
+                }),
+              ),
+            )
+          },
+          { concurrency: 8 },
+        )
+        return SearchResponse.make({
+          results: results.filter((result): result is SearchResult => result !== null),
+          truncated: matches.truncated,
+        })
       })
+
+      const retryPreview: CatalogShape["retryPreview"] = Effect.fn("Catalog.retryPreview")(
+        function* (id) {
+          yield* run("catalog.retryPreview", (db) =>
+            db.transaction(async (tx) => {
+              await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${id}, 1))`)
+              const entry = await requireEntry(tx, id)
+              if (entry.kind !== "file" || previewKindForMime(entry.mimeType) === "none") {
+                throw invalidInput("This file does not support previews")
+              }
+              await tx
+                .update(schema.entries)
+                .set({ previewError: null, updatedAt: new Date() })
+                .where(eq(schema.entries.id, id))
+              const active = await tx
+                .select({ id: schema.jobs.id })
+                .from(schema.jobs)
+                .where(sql`${schema.jobs.kind} = 'preview'
+                  and ${schema.jobs.payload}->>'entryId' = ${id}
+                  and ${schema.jobs.status} in ('pending', 'running', 'failed')`)
+                .limit(1)
+              if (active.length === 0) {
+                await tx.insert(schema.jobs).values({ kind: "preview", payload: { entryId: id } })
+              }
+            }),
+          )
+          return Ok.make({ ok: true })
+        },
+      )
 
       const createFolder: CatalogShape["createFolder"] = Effect.fn("Catalog.createFolder")(
         function* (parentId, requestedName) {
@@ -874,6 +937,7 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
       return Catalog.of({
         list,
         search,
+        retryPreview,
         createFolder,
         rename,
         move,

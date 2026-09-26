@@ -15,6 +15,13 @@
       "when": 1790429116232,
       "tag": "0001_natural_sort",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790442190492,
+      "tag": "0002_clumsy_darkstar",
+      "breakpoints": true
     }
   ]
 }

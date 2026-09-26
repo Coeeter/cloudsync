@@ -1,6 +1,7 @@
 import type { GetObjectOutput } from "@aws-sdk/client-s3"
+import { isAnimatedWebP } from "@cloudsync/core"
 import { Database, type DatabaseError, schema } from "@cloudsync/db"
-import { and, eq, inArray, isNotNull, lte, or, sql } from "drizzle-orm"
+import { and, eq, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm"
 import { Context, Effect, FileSystem, Layer, Path, Schema, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { Storage, type StorageError } from "./storage"
@@ -41,7 +42,7 @@ export interface WorkerShape {
 
 function extractedFrame(
   bytes: Uint8Array,
-  kind: "video" | "pdf",
+  kind: "video" | "pdf" | "webp",
   spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
   fileSystem: FileSystem.FileSystem,
   path: Path.Path,
@@ -54,7 +55,10 @@ function extractedFrame(
           (cause) => new WorkerJobError({ message: "Could not create preview workspace", cause }),
         ),
       )
-    const input = path.join(directory, kind === "pdf" ? "input.pdf" : "input.video")
+    const input = path.join(
+      directory,
+      kind === "pdf" ? "input.pdf" : kind === "webp" ? "input.webp" : "input.video",
+    )
     const output = path.join(directory, "frame.jpg")
     yield* fileSystem
       .writeFile(input, bytes)
@@ -64,16 +68,15 @@ function extractedFrame(
         ),
       )
     const command =
-      kind === "video"
+      kind !== "pdf"
         ? ChildProcess.make("ffmpeg", [
             "-hide_banner",
             "-loglevel",
             "error",
             "-i",
             input,
-            // thumbnail picks a representative frame, and works for clips shorter than any fixed seek.
-            "-vf",
-            "thumbnail",
+            // Videos use a representative frame; animated WebP stops after its first frame.
+            ...(kind === "video" ? ["-vf", "thumbnail"] : []),
             "-frames:v",
             "1",
             "-y",
@@ -198,16 +201,27 @@ export class Worker extends Context.Service<Worker, WorkerShape>()("@cloudsync/c
           return row
         })
         if (!entry?.objectKey || !entry.mimeType) return
-        const object = yield* storage.get(entry.objectKey)
+        const objectKey = entry.objectKey
+        const object = yield* storage.get(objectKey)
         if (!object.Body) {
           return yield* new WorkerJobError({ message: "Object body was empty", cause: null })
         }
         const original = yield* readObjectBody(object.Body)
+        const isWebP = entry.mimeType === "image/webp"
+        const isAnimated = isWebP
+          ? yield* Effect.try({
+              try: () => isAnimatedWebP(original),
+              catch: (cause) =>
+                new WorkerJobError({ message: "Could not inspect the WebP container", cause }),
+            })
+          : null
         const source = entry.mimeType.startsWith("video/")
           ? yield* extractedFrame(original, "video", spawner, fileSystem, path)
           : entry.mimeType === "application/pdf"
             ? yield* extractedFrame(original, "pdf", spawner, fileSystem, path)
-            : original
+            : isAnimated
+              ? yield* extractedFrame(original, "webp", spawner, fileSystem, path)
+              : original
         const thumbnail = yield* Effect.tryPromise({
           try: () =>
             new BunImage(source, { autoOrient: true })
@@ -243,8 +257,20 @@ export class Worker extends Context.Service<Worker, WorkerShape>()("@cloudsync/c
           db.transaction(async (tx) => {
             await tx
               .update(schema.entries)
-              .set({ thumbnailKey, previewKey, previewError: null, updatedAt: new Date() })
-              .where(eq(schema.entries.id, entry.id))
+              .set({
+                thumbnailKey,
+                previewKey,
+                previewError: null,
+                isAnimated,
+                updatedAt: new Date(),
+              })
+              .where(
+                and(
+                  eq(schema.entries.id, entry.id),
+                  eq(schema.entries.objectKey, objectKey),
+                  isNull(schema.entries.deletedAt),
+                ),
+              )
             if (replaced.length > 0) {
               await tx
                 .insert(schema.jobs)

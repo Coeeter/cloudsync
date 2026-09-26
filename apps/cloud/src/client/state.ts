@@ -1,4 +1,4 @@
-import type { DirectoryListing, Entry, Session } from "@cloudsync/domain"
+import type { DirectoryListing, Entry, SearchResult, Session } from "@cloudsync/domain"
 import { Data, Effect } from "effect"
 import { Atom, AtomRegistry } from "effect/unstable/reactivity"
 import { establishSession, logout, runRpc } from "./rpc"
@@ -18,7 +18,10 @@ export const emailAtom = Atom.make("")
 export const sessionAtom = Atom.make<Session | null>(null)
 export const listingAtom = Atom.make<DirectoryListing | null>(null)
 export const queryAtom = Atom.make("")
-export const searchResultsAtom = Atom.make<ReadonlyArray<Entry>>([])
+export const searchResultsAtom = Atom.make<ReadonlyArray<SearchResult>>([])
+export const searchLoadingAtom = Atom.make(false)
+export const searchTruncatedAtom = Atom.make(false)
+export const recycleEntriesAtom = Atom.make<ReadonlyArray<Entry>>([])
 export const busyAtom = Atom.make(false)
 export const errorAtom = Atom.make<string | null>(null)
 export const noticeAtom = Atom.make<string | null>(null)
@@ -71,8 +74,7 @@ const run = <A>(effect: Effect.Effect<A, unknown>) =>
 
 const currentFolderId = () => registry.get(listingAtom)?.directory?.id ?? null
 
-const needsPreview = (entry: Entry) =>
-  entry.kind === "file" && entry.previewKind !== "none" && entry.thumbnailUrl === null
+const needsPreview = (entry: Entry) => entry.kind === "file" && entry.previewStatus === "pending"
 
 let previewPoll: ReturnType<typeof setTimeout> | null = null
 let previewPollAttempts = 0
@@ -82,18 +84,29 @@ function schedulePreviewPoll(listing: DirectoryListing, reset: boolean) {
   if (previewPoll) clearTimeout(previewPoll)
   previewPoll = null
   if (reset) previewPollAttempts = 0
-  if (!listing.entries.some(needsPreview) || previewPollAttempts >= 20) return
+  if (!listing.entries.some(needsPreview)) return
   previewPollAttempts += 1
   const folderId = listing.directory?.id ?? null
+  const delay =
+    previewPollAttempts <= 5
+      ? 3000
+      : Math.min(30_000, 3000 * 2 ** Math.min(previewPollAttempts - 5, 4))
   previewPoll = setTimeout(() => {
     if (registry.get(viewAtom) !== "files" || currentFolderId() !== folderId) return
+    if (typeof document !== "undefined" && document.hidden) {
+      const current = registry.get(listingAtom)
+      if (current) schedulePreviewPoll(current, false)
+      return
+    }
     const loaded = registry.get(listingAtom)?.entries.length ?? 0
     void run(loadDirectory(folderId, { resetPoll: false, keepQuery: true, limit: loaded }))
-  }, 3000)
+  }, delay)
 }
 
+let searchRequest = 0
+
 export const actions = {
-  boot: () =>
+  boot: (parentId: string | null = null, recycle = false) =>
     run(
       attempt(() => runRpc((client) => client["auth.session"]({}))).pipe(
         Effect.tap((session) =>
@@ -104,7 +117,7 @@ export const actions = {
         ),
         // Re-issues the short-lived CloudFront viewer cookies for a long-lived session.
         Effect.tap(() => establishSession(undefined).pipe(Effect.ignore)),
-        Effect.flatMap(() => loadDirectory(null)),
+        Effect.flatMap(() => (recycle ? Effect.void : loadDirectory(parentId))),
         Effect.catch(() => Effect.sync(() => registry.set(authViewAtom, "email"))),
       ),
     ),
@@ -192,7 +205,7 @@ export const actions = {
             Effect.sync(() => {
               registry.set(viewAtom, "recycle")
               registry.set(recycleListingAtom, null)
-              registry.set(searchResultsAtom, entries)
+              registry.set(recycleEntriesAtom, entries)
               registry.set(queryAtom, "")
             }),
           ),
@@ -238,20 +251,69 @@ export const actions = {
     )
   },
 
+  setSearchQuery: (query: string) => {
+    registry.set(queryAtom, query)
+    registry.set(searchResultsAtom, [])
+    registry.set(searchTruncatedAtom, false)
+    registry.set(searchLoadingAtom, Boolean(query.trim()))
+  },
+
   search: (query: string) => {
+    const request = ++searchRequest
     registry.set(queryAtom, query)
     if (!query.trim()) {
       registry.set(searchResultsAtom, [])
+      registry.set(searchTruncatedAtom, false)
+      registry.set(searchLoadingAtom, false)
       return Promise.resolve()
     }
+    registry.set(searchLoadingAtom, true)
     return run(
       attempt(() => runRpc((client) => client["catalog.search"]({ query, limit: 100 }))).pipe(
-        Effect.tap((entries) =>
+        Effect.tap((response) =>
           Effect.sync(() => {
-            if (registry.get(queryAtom) === query) registry.set(searchResultsAtom, entries)
+            if (searchRequest !== request || registry.get(queryAtom) !== query) return
+            registry.set(searchResultsAtom, response.results)
+            registry.set(searchTruncatedAtom, response.truncated)
+          }),
+        ),
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (searchRequest === request) registry.set(searchLoadingAtom, false)
           }),
         ),
       ),
+    )
+  },
+
+  retryPreview: (entry: Entry) => {
+    if (entry.previewStatus !== "failed") return Promise.resolve()
+    registry.set(activeEntryAtom, { ...entry, previewStatus: "pending" } as Entry)
+    return run(
+      attempt(() => runRpc((client) => client["catalog.retryPreview"]({ id: entry.id }))).pipe(
+        Effect.flatMap(() =>
+          loadDirectory(currentFolderId(), {
+            keepQuery: true,
+            limit: registry.get(listingAtom)?.entries.length,
+          }),
+        ),
+        Effect.andThen(
+          registry.get(queryAtom).trim()
+            ? Effect.promise(() => actions.search(registry.get(queryAtom)))
+            : Effect.void,
+        ),
+      ),
+    )
+  },
+
+  refreshPendingPreviews: () => {
+    const listing = registry.get(listingAtom)
+    if (!listing?.entries.some(needsPreview) || registry.get(viewAtom) !== "files") return
+    void run(
+      loadDirectory(currentFolderId(), {
+        keepQuery: true,
+        limit: listing.entries.length,
+      }),
     )
   },
 
@@ -455,6 +517,8 @@ function loadDirectory(
         if (!options.keepQuery) {
           registry.set(queryAtom, "")
           registry.set(searchResultsAtom, [])
+          registry.set(searchLoadingAtom, false)
+          registry.set(searchTruncatedAtom, false)
         }
         schedulePreviewPoll(listing, options.resetPoll ?? true)
       }),
@@ -467,7 +531,7 @@ function reloadRecycleBin() {
     Effect.tap((entries) =>
       Effect.sync(() => {
         registry.set(recycleListingAtom, null)
-        registry.set(searchResultsAtom, entries)
+        registry.set(recycleEntriesAtom, entries)
       }),
     ),
   )
