@@ -9,7 +9,7 @@
   },
   "main": "out/main/index.js",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "electron-vite dev --watch",
     "build": "electron-vite build",
     "package": "electron-vite build && electron-builder --mac dir --arm64",
     "check": "tsc -p tsconfig.json --noEmit",
