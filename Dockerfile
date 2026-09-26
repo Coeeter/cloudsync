@@ -42,4 +42,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD ["bun", "-e", "const r = await fetch('http://127.0.0.1:' + (process.env.PORT ?? 3000) + '/health'); process.exit(r.ok ? 0 : 1)"]
 # Web by default; run the worker from the same image with:
 #   bun apps/cloud/dist-worker/worker.js
+# The worker has no HTTP server, so its service must disable this HEALTHCHECK
+# (Swarm: {"Test": ["NONE"]}) or it is restarted in a loop.
 CMD ["bun", "apps/cloud/.output/server/index.mjs"]

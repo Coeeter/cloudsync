@@ -1,6 +1,6 @@
 # CloudSync implementation plan
 
-Status: Approved; implementation in progress.
+Status: Approved; implemented and deployed.
 
 ## Approach
 
@@ -46,18 +46,24 @@ Pin one matching Effect v4 RC package set and use its shipped documentation as t
 
 ## Current state
 
-- Stages 1–4 implemented; stage 5 infrastructure provisioned (Doppler `cloudsync` dev/prod, mirrored private S3 buckets, OAC-only CloudFront at `files-dev.example.com` and `files.example.com`, ACM certificate).
+- All stages implemented and deployed; owner validated the web flows and desktop ingestion in dev. Infrastructure (Doppler `cloudsync` dev/prod, mirrored private S3 buckets, OAC-only CloudFront at `files-dev.example.com` and `files.example.com`, ACM certificate).
 - Dev runs against local PostgreSQL (`compose.dev.yml`) and the real AWS dev bucket; `bun run dev` starts the web app and the preview worker.
 - PIN emails always go through Resend. The former `DEV_AUTH_CODE` bypass was removed; the unused Doppler value can be deleted.
 - Explicit downloads use short-lived S3 presigned URLs with an attachment `Content-Disposition`, because CloudFront does not forward `response-content-disposition`. Thumbnails, previews, and viewer media go through CloudFront.
-- Verified: presigned browser PUT with SHA-256 checksum against the dev bucket, PIN verification, and session establishment.
+- Verified: presigned browser PUT with SHA-256 checksum against the dev bucket, keyset pagination against real data, Recycle Bin browsing, the production image (web + worker) against real Postgres and S3, and the public deployment (TLS, health, RPC, unsigned CDN requests rejected).
+
+## Production
+
+- Live at `https://sync.example.com` on Dokploy project `cloudsync` (VPS `my-vps`): `web` (image default command, domain on port 3000 with Let's Encrypt), `worker` (command `bun apps/cloud/dist-worker/worker.js`, Swarm health check disabled), and Dokploy Postgres 17 `database`.
+- Image `ghcr.io/coeeter/cloudsync:latest` is built by GitHub Actions on every push to `main`; Dokploy pulls it through its GHCR registry access.
+- App env is Doppler `cloudsync/prod` (minus `DOPPLER_*` and `DOKPLOY_API_KEY`) pushed through the Dokploy API; `DATABASE_URL` points at the Dokploy Postgres service.
+- Both CloudFront distributions use PriceClass_200 (Singapore edge) and response headers policy `cloudsync-immutable-private`.
 
 ## Remaining work
 
-- Owner validation of the web flows (upload, previews, rename/move/trash/restore/ZIP) and Electron ingestion against a temporary inbox.
-- Package the Electron app (`bun --filter @cloudsync/desktop package`) and place it in `~/Applications`.
-- Production: `DATABASE_URL`, Dokploy web (`bun apps/cloud/.output/server/index.mjs`) and worker (`bun apps/cloud/dist-worker/worker.js`) services, `sync.example.com` DNS, and adding `https://sync.example.com` to the prod bucket CORS origins.
+- Package the Electron app (`bun --filter @cloudsync/desktop package`), move it to `~/Applications`; packaged builds default to `https://sync.example.com`.
+- Deploys are manual: after CI publishes a new image, redeploy `web` and `worker` in Dokploy.
 
 ## Blockers
 
-- DNS changes and final Dokploy production deployment require owner action.
+- None.
