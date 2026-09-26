@@ -2,7 +2,7 @@ import "@fontsource-variable/geist"
 import "@fontsource-variable/geist-mono"
 import { createRootRoute, HeadContent, Outlet, Scripts } from "@tanstack/react-router"
 import type { ReactNode } from "react"
-import styles from "../styles.css?url"
+import styles from "@cloudsync/ui/styles.css?url"
 
 export const Route = createRootRoute({
   head: () => ({

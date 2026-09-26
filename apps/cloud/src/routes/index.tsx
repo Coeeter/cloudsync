@@ -26,6 +26,7 @@ import {
   DropdownMenuTrigger,
 } from "@cloudsync/ui/components/dropdown-menu"
 import { Input } from "@cloudsync/ui/components/input"
+import { InputOTP, InputOTPGroup, InputOTPSlot } from "@cloudsync/ui/components/input-otp"
 import { Progress } from "@cloudsync/ui/components/progress"
 import { createFileRoute } from "@tanstack/react-router"
 import {
@@ -126,8 +127,8 @@ function AuthScreen({ view }: { view: "checking" | "email" | "pin" }) {
 
   if (view === "checking") {
     return (
-      <main className="auth-screen">
-        <p className="auth-copy">Opening your archive…</p>
+      <main className="grid min-h-screen place-items-center p-6">
+        <p className="mb-3.5 text-muted-foreground leading-normal">Opening your archive…</p>
       </main>
     )
   }
@@ -143,12 +144,14 @@ function AuthScreen({ view }: { view: "checking" | "email" | "pin" }) {
   }
 
   return (
-    <main className="auth-screen">
-      <section className="auth-panel">
-        <h1 className="auth-title">CloudSync</h1>
+    <main className="grid min-h-screen place-items-center p-6">
+      <section className="w-full max-w-sm">
+        <h1 className="mb-2 text-3xl font-semibold tracking-tighter">CloudSync</h1>
         {view === "email" ? (
-          <form key="email" className="auth-form" onSubmit={submitEmail}>
-            <p className="auth-copy">Enter the owner email to receive a sign-in code.</p>
+          <form key="email" className="grid gap-3" onSubmit={submitEmail}>
+            <p className="mb-3.5 text-muted-foreground leading-normal">
+              Enter the owner email to receive a sign-in code.
+            </p>
             <Input
               type="email"
               name="email"
@@ -158,47 +161,64 @@ function AuthScreen({ view }: { view: "checking" | "email" | "pin" }) {
               required
               autoFocus
             />
-            {error ? <p className="error-copy">{error}</p> : null}
+            {error ? <p className="m-0 text-sm text-destructive">{error}</p> : null}
             <Button disabled={busy}>{busy ? "Sending…" : "Send code"}</Button>
           </form>
         ) : (
           <form
             key="pin"
-            className="auth-form"
+            className="grid gap-3"
             onSubmit={(event) => {
               event.preventDefault()
               submitCode(code)
             }}
           >
-            <p className="auth-copy">
-              Enter the six-digit code sent to <strong className="auth-email">{savedEmail}</strong>.
+            <p className="mb-3.5 text-muted-foreground leading-normal">
+              Enter the six-digit code sent to{" "}
+              <strong className="break-all font-[540] text-foreground">{savedEmail}</strong>.
             </p>
-            <Input
-              className="pin-input"
+            <InputOTP
               name="code"
-              inputMode="numeric"
               autoComplete="one-time-code"
               maxLength={6}
-              placeholder="••••••"
               value={code}
-              onChange={(event) => {
-                const next = event.target.value.replaceAll(/\D/g, "").slice(0, 6)
-                setCode(next)
-                submitCode(next)
-              }}
+              onChange={setCode}
+              onComplete={submitCode}
               required
               autoFocus
-            />
-            {error ? <p className="error-copy">{error}</p> : null}
-            {notice ? <p className="notice-copy">{notice}</p> : null}
+              pattern="[0-9]*"
+              containerClassName="w-full"
+            >
+              <InputOTPGroup className="w-full">
+                {[0, 1, 2, 3, 4, 5].map((index) => (
+                  <InputOTPSlot
+                    className="h-12 flex-1 font-mono text-xl"
+                    index={index}
+                    key={index}
+                  />
+                ))}
+              </InputOTPGroup>
+            </InputOTP>
+            {error ? <p className="m-0 text-sm text-destructive">{error}</p> : null}
+            {notice ? <p className="m-0 text-sm text-muted-foreground">{notice}</p> : null}
             <Button disabled={busy || code.length !== 6}>
               {busy ? "Checking…" : "Open archive"}
             </Button>
-            <div className="auth-links">
-              <button type="button" onClick={actions.changeEmail} disabled={busy}>
+            <div className="flex justify-between gap-3">
+              <button
+                className="border-0 bg-transparent px-0 py-1 text-sm text-muted-foreground hover:not-disabled:text-foreground"
+                type="button"
+                onClick={actions.changeEmail}
+                disabled={busy}
+              >
                 Use a different email
               </button>
-              <button type="button" onClick={() => void actions.resendPin()} disabled={busy}>
+              <button
+                className="border-0 bg-transparent px-0 py-1 text-sm text-muted-foreground hover:not-disabled:text-foreground"
+                type="button"
+                onClick={() => void actions.resendPin()}
+                disabled={busy}
+              >
                 Resend code
               </button>
             </div>
@@ -307,7 +327,7 @@ function FileBrowser() {
       (records) => {
         if (records.some((record) => record.isIntersecting)) void actions.loadMore()
       },
-      { rootMargin: "1200px 0px" },
+      { rootMargin: "75rem 0rem" },
     )
     observer.observe(node)
     return () => observer.disconnect()
@@ -341,7 +361,7 @@ function FileBrowser() {
 
   return (
     <main
-      className="app-shell"
+      className="min-h-screen px-4 pt-[max(1.5rem,env(safe-area-inset-top))] pb-16 sm:px-6 lg:px-12"
       onDragEnter={onDragEnter}
       onDragOver={(event) => {
         if (carriesFiles(event)) event.preventDefault()
@@ -349,8 +369,11 @@ function FileBrowser() {
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
-      <header className="topbar">
-        <nav className="breadcrumb" aria-label="Current folder">
+      <header className="sticky top-0 z-20 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-5 bg-[linear-gradient(var(--carbon)_72%,transparent)] pt-2.5 pb-5 max-sm:grid-cols-1 max-sm:gap-2">
+        <nav
+          className="flex min-w-0 items-center gap-2 overflow-hidden text-base text-muted-foreground lg:text-lg [&_button]:overflow-hidden [&_button]:border-0 [&_button]:bg-transparent [&_button]:px-px [&_button]:py-1 [&_button]:text-inherit [&_button]:text-ellipsis [&_button]:whitespace-nowrap [&_button:hover]:text-foreground [&_button[aria-current=page]]:font-semibold [&_button[aria-current=page]]:text-foreground"
+          aria-label="Current folder"
+        >
           {view === "recycle" ? (
             <>
               <button type="button" onClick={() => void navigateFolder(null, false)}>
@@ -358,7 +381,10 @@ function FileBrowser() {
               </button>
               {(recycleListing?.breadcrumbs ?? [{ id: null, name: "Recycle Bin" }]).map(
                 (crumb, index, crumbs) => (
-                  <span key={crumb.id ?? "recycle"} className="crumb">
+                  <span
+                    key={crumb.id ?? "recycle"}
+                    className="inline-flex min-w-0 items-center gap-2"
+                  >
                     <span aria-hidden="true">/</span>
                     <button
                       type="button"
@@ -373,7 +399,7 @@ function FileBrowser() {
             </>
           ) : (
             (listing?.breadcrumbs ?? []).map((crumb, index, crumbs) => (
-              <span key={crumb.id ?? "root"} className="crumb">
+              <span key={crumb.id ?? "root"} className="inline-flex min-w-0 items-center gap-2">
                 {index > 0 ? <span aria-hidden="true">/</span> : null}
                 <button
                   type="button"
@@ -386,13 +412,17 @@ function FileBrowser() {
             ))
           )}
         </nav>
-        <div className="top-actions">
+        <div className="flex items-center gap-2 max-sm:justify-between">
           {view === "files" ? (
             <>
-              <div className="search-wrap">
-                <Search className="search-icon" size={16} strokeWidth={1.8} />
+              <div className="relative max-sm:flex-1">
+                <Search
+                  className="pointer-events-none absolute top-3 left-3 text-muted-foreground"
+                  size={16}
+                  strokeWidth={1.8}
+                />
                 <Input
-                  className="search-input"
+                  className="h-10 w-40 rounded-lg border-transparent bg-card pr-10 pl-10 text-foreground focus-visible:border-ring sm:w-56 lg:w-80 max-sm:w-full"
                   value={query}
                   onChange={onSearch}
                   onKeyDown={(event) => {
@@ -404,7 +434,7 @@ function FileBrowser() {
                 {query ? (
                   <button
                     type="button"
-                    className="search-clear"
+                    className="absolute top-1/2 right-2 grid size-6 -translate-y-1/2 place-items-center rounded-md border-0 bg-transparent p-0 text-muted-foreground hover:bg-accent hover:text-foreground"
                     aria-label="Clear search"
                     onClick={() => void actions.search("")}
                   >
@@ -432,7 +462,7 @@ function FileBrowser() {
               </Button>
               <Button onClick={() => fileInput.current?.click()}>
                 <Upload size={16} />
-                <span className="desktop-label">Upload</span>
+                <span className="max-sm:hidden">Upload</span>
               </Button>
             </>
           ) : null}
@@ -471,15 +501,23 @@ function FileBrowser() {
       </header>
 
       {error ? (
-        <div className="error-banner" role="alert">
+        <div
+          className="mb-4 flex items-start justify-between gap-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-sm leading-normal text-destructive"
+          role="alert"
+        >
           <span>{error}</span>
-          <button type="button" aria-label="Dismiss" onClick={actions.dismissError}>
+          <button
+            className="shrink-0 border-0 bg-transparent p-0.5 text-inherit"
+            type="button"
+            aria-label="Dismiss"
+            onClick={actions.dismissError}
+          >
             <X size={14} />
           </button>
         </div>
       ) : null}
       {progress ? (
-        <div className="upload-progress" aria-live="polite">
+        <div className="mb-4 grid max-w-sm gap-2 text-xs text-muted-foreground" aria-live="polite">
           <span>
             Uploading {progress.done + progress.failed} of {progress.total}
             {progress.failed > 0 ? ` · ${progress.failed} failed` : ""}
@@ -488,15 +526,17 @@ function FileBrowser() {
         </div>
       ) : null}
       {recycleMode === "root" ? (
-        <p className="view-note">Items here are permanently deleted after 30 days.</p>
+        <p className="mb-4 text-sm text-muted-foreground">
+          Items here are permanently deleted after 30 days.
+        </p>
       ) : null}
       {recycleMode === "nested" ? (
-        <p className="view-note">
+        <p className="mb-4 text-sm text-muted-foreground">
           Viewing a deleted folder. Restore it from the Recycle Bin to bring it back.
         </p>
       ) : null}
       {searching ? (
-        <p className="view-note">
+        <p className="mb-4 text-sm text-muted-foreground">
           {searchLoading
             ? `Searching for “${query.trim()}”…`
             : `${searchResults.length}${searchTruncated ? "+" : ""} result${searchResults.length === 1 && !searchTruncated ? "" : "s"} for “${query.trim()}”${searchTruncated ? " · showing the first 100" : ""}`}
@@ -505,7 +545,7 @@ function FileBrowser() {
 
       {entries.length > 0 ? (
         <section
-          className="file-grid"
+          className="grid grid-cols-2 items-start gap-x-3 gap-y-4 sm:grid-cols-4 sm:gap-x-4 lg:grid-cols-6 lg:gap-x-6 lg:gap-y-7 2xl:grid-cols-8"
           aria-label={searching ? "Search results" : "Folder contents"}
         >
           {entries.map((entry) => (
@@ -519,7 +559,7 @@ function FileBrowser() {
           ))}
         </section>
       ) : (
-        <section className="empty-state">
+        <section className="grid min-h-[55vh] place-items-center text-center text-muted-foreground">
           <div>
             {recycleMode === "root" ? (
               <Trash2 size={40} strokeWidth={1.2} />
@@ -544,13 +584,19 @@ function FileBrowser() {
       )}
 
       {hasMore ? (
-        <div ref={sentinel} className="load-more" aria-live="polite">
+        <div
+          ref={sentinel}
+          className="grid min-h-16 place-items-center text-sm text-muted-foreground"
+          aria-live="polite"
+        >
           {loadingMore ? "Loading more…" : null}
         </div>
       ) : null}
 
       {dragActive ? (
-        <div className="drop-overlay">Add to {listing?.directory?.name ?? "CloudSync"}</div>
+        <div className="pointer-events-none fixed inset-4 z-50 grid place-items-center rounded-xl border-2 border-ring bg-[rgba(11,12,14,0.9)] text-xl text-foreground">
+          Add to {listing?.directory?.name ?? "CloudSync"}
+        </div>
       ) : null}
       <NewFolderDialog open={newFolderOpen} name={newFolderName} />
       <RenameDialog entry={renameEntry} value={renameValue} />
@@ -575,17 +621,17 @@ function EntryCard({
   const [broken, setBroken] = useState(false)
   const fallback =
     entry.kind === "directory" ? (
-      <Folder className="directory-mark" size={52} strokeWidth={1.25} />
+      <Folder className="text-foreground opacity-[0.68]" size={52} strokeWidth={1.25} />
     ) : entry.previewKind === "image" ? (
-      <ImageIcon className="entry-fallback" size={40} strokeWidth={1.2} />
+      <ImageIcon className="text-[#6c727d]" size={40} strokeWidth={1.2} />
     ) : entry.previewKind === "video" ? (
-      <Video className="entry-fallback" size={40} strokeWidth={1.2} />
+      <Video className="text-[#6c727d]" size={40} strokeWidth={1.2} />
     ) : entry.previewKind === "pdf" ? (
-      <FileText className="entry-fallback" size={40} strokeWidth={1.2} />
+      <FileText className="text-[#6c727d]" size={40} strokeWidth={1.2} />
     ) : entry.mimeType?.includes("zip") ? (
-      <FileArchive className="entry-fallback" size={40} strokeWidth={1.2} />
+      <FileArchive className="text-[#6c727d]" size={40} strokeWidth={1.2} />
     ) : (
-      <FileIcon className="entry-fallback" size={40} strokeWidth={1.2} />
+      <FileIcon className="text-[#6c727d]" size={40} strokeWidth={1.2} />
     )
 
   const open = () => {
@@ -595,12 +641,27 @@ function EntryCard({
   }
 
   return (
-    <article className="entry-card" data-kind={entry.kind}>
-      <button type="button" className="entry-open" onClick={open} title={entry.name}>
-        <div className="entry-viewport">
+    <article className="relative min-w-0">
+      <button
+        type="button"
+        className="group block w-full border-0 bg-transparent p-0 text-left text-inherit outline-none"
+        onClick={open}
+        title={entry.name}
+      >
+        <div
+          className={
+            entry.kind === "directory"
+              ? "relative grid aspect-square place-items-center overflow-hidden rounded-lg border border-[rgba(243,241,235,0.18)] bg-card p-2 before:absolute before:top-0 before:right-0 before:z-[2] before:h-[13%] before:w-[36%] before:origin-top-right before:translate-x-2 before:skew-x-[-24deg] before:border-b before:border-l before:border-[rgba(243,241,235,0.16)] before:bg-background group-focus-visible:ring-2 group-focus-visible:ring-ring"
+              : "relative grid aspect-square place-items-center overflow-hidden rounded-lg border border-border bg-[#111317] group-focus-visible:ring-2 group-focus-visible:ring-ring"
+          }
+        >
           {entry.thumbnailUrl && !broken ? (
             <img
-              className="entry-preview"
+              className={
+                entry.kind === "directory"
+                  ? "size-full rounded-sm object-contain opacity-85"
+                  : "size-full object-contain"
+              }
               src={entry.thumbnailUrl}
               alt=""
               loading="lazy"
@@ -611,22 +672,34 @@ function EntryCard({
             fallback
           )}
           {entry.kind === "file" && entry.previewKind === "video" && entry.thumbnailUrl ? (
-            <span className="entry-badge">
+            <span className="absolute right-2 bottom-2 grid size-6 place-items-center rounded-md bg-[rgba(11,12,14,0.72)] text-foreground">
               <Video size={12} />
             </span>
           ) : null}
           {entry.kind === "file" &&
           entry.previewStatus !== "ready" &&
           entry.previewKind !== "none" ? (
-            <span className="preview-state" data-state={entry.previewStatus}>
+            <span
+              className={
+                entry.previewStatus === "failed"
+                  ? "absolute right-2 bottom-2 rounded-sm border border-destructive/45 bg-[rgba(11,12,14,0.82)] px-1.5 py-1 text-xs text-destructive"
+                  : "absolute right-2 bottom-2 rounded-sm border border-[rgba(243,241,235,0.14)] bg-[rgba(11,12,14,0.82)] px-1.5 py-1 text-xs text-muted-foreground"
+              }
+            >
               {entry.previewStatus === "failed" ? "Preview failed" : "Processing preview"}
             </span>
           ) : null}
         </div>
-        <div className="entry-meta">
-          <span className="entry-name">{entry.name}</span>
-          {searchPath ? <span className="entry-path">{searchPath}</span> : null}
-          <span className="entry-detail">
+        <div className="grid gap-0.5 pt-2 pr-8 pl-0.5">
+          <span className="overflow-hidden text-sm font-medium text-ellipsis whitespace-nowrap">
+            {entry.name}
+          </span>
+          {searchPath ? (
+            <span className="overflow-hidden text-xs text-muted-foreground text-ellipsis whitespace-nowrap">
+              {searchPath}
+            </span>
+          ) : null}
+          <span className="font-mono text-xs text-muted-foreground">
             {entry.kind === "directory"
               ? `${entry.childCount} item${entry.childCount === 1 ? "" : "s"}`
               : formatBytes(entry.size)}
@@ -637,7 +710,7 @@ function EntryCard({
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
-              className="entry-menu-button"
+              className="absolute -right-1 bottom-0.5 grid size-7 place-items-center rounded-md border-0 bg-transparent text-muted-foreground hover:bg-card hover:text-foreground"
               size="icon-sm"
               variant="ghost"
               aria-label={`Actions for ${entry.name}`}
@@ -711,7 +784,7 @@ function NewFolderDialog({ open, name }: { open: boolean; name: string }) {
     >
       <DialogContent>
         <form
-          className="dialog-form"
+          className="grid gap-5"
           onSubmit={(event) => {
             event.preventDefault()
             if (name.trim()) void actions.createFolder(name.trim())
@@ -756,7 +829,7 @@ function RenameDialog({ entry, value }: { entry: Entry | null; value: string }) 
     >
       <DialogContent>
         <form
-          className="dialog-form"
+          className="grid gap-5"
           onSubmit={(event) => {
             event.preventDefault()
             if (entry && value.trim() && value.trim() !== entry.name)
@@ -886,12 +959,14 @@ function Lightbox({ entry, entries }: { entry: Entry | null; entries: ReadonlyAr
     >
       <DialogContent
         showCloseButton={false}
-        className="lightbox top-0 left-0 flex h-dvh w-screen max-w-none translate-x-0 translate-y-0 flex-col gap-0 rounded-none border-0 bg-[#050506] p-0 shadow-none sm:max-w-none"
+        className="top-0 left-0 flex h-dvh w-screen max-w-none translate-x-0 translate-y-0 flex-col gap-0 rounded-none border-0 bg-[#050506] p-0 text-foreground shadow-none sm:max-w-none"
       >
-        <header className="lightbox-bar">
-          <div className="lightbox-title">
-            <DialogTitle className="lightbox-name">{entry?.name}</DialogTitle>
-            <DialogDescription className="lightbox-meta">
+        <header className="absolute top-0 right-0 left-0 z-[3] flex items-center gap-1 bg-[linear-gradient(rgba(0,0,0,0.72),transparent)] px-3 pt-[max(0.75rem,env(safe-area-inset-top))] pb-7">
+          <div className="grid min-w-0 flex-1 gap-0.5">
+            <DialogTitle className="overflow-hidden text-sm font-[560] text-ellipsis whitespace-nowrap">
+              {entry?.name}
+            </DialogTitle>
+            <DialogDescription className="font-mono text-xs text-muted-foreground">
               {entry ? formatBytes(entry.size) : ""}
               {files.length > 1 && index >= 0 ? ` · ${index + 1} / ${files.length}` : ""}
               {entry?.previewStatus === "failed" ? " · preview failed" : ""}
@@ -925,13 +1000,17 @@ function Lightbox({ entry, entries }: { entry: Entry | null; entries: ReadonlyAr
             <X size={20} />
           </Button>
         </header>
-        <div className="lightbox-stage" onPointerDown={onPointerDown} onPointerUp={onPointerUp}>
+        <div
+          className="relative min-h-0 flex-1 touch-pan-y select-none"
+          onPointerDown={onPointerDown}
+          onPointerUp={onPointerUp}
+        >
           {entry ? <LightboxMedia key={entry.id} entry={entry} /> : null}
           {files.length > 1 ? (
             <>
               <button
                 type="button"
-                className="lightbox-nav lightbox-prev"
+                className="absolute top-1/2 left-3.5 z-[2] grid size-12 -translate-y-1/2 place-items-center rounded-full border-0 bg-[rgba(20,22,26,0.6)] text-foreground opacity-70 hover:opacity-100 focus-visible:opacity-100 max-sm:hidden"
                 aria-label="Previous"
                 onClick={() => step(-1)}
               >
@@ -939,7 +1018,7 @@ function Lightbox({ entry, entries }: { entry: Entry | null; entries: ReadonlyAr
               </button>
               <button
                 type="button"
-                className="lightbox-nav lightbox-next"
+                className="absolute top-1/2 right-3.5 z-[2] grid size-12 -translate-y-1/2 place-items-center rounded-full border-0 bg-[rgba(20,22,26,0.6)] text-foreground opacity-70 hover:opacity-100 focus-visible:opacity-100 max-sm:hidden"
                 aria-label="Next"
                 onClick={() => step(1)}
               >
@@ -958,7 +1037,7 @@ function LightboxMedia({ entry }: { entry: Entry }) {
     return (
       // biome-ignore lint/a11y/useMediaCaption: personal archive media has no caption tracks
       <video
-        className="lightbox-media"
+        className="absolute inset-x-4 top-16 bottom-4 size-auto object-contain max-sm:inset-x-0 max-sm:top-16 max-sm:bottom-0"
         src={entry.contentUrl}
         poster={entry.previewUrl ?? undefined}
         controls
@@ -969,7 +1048,11 @@ function LightboxMedia({ entry }: { entry: Entry }) {
   }
   if (entry.previewKind === "pdf" && entry.contentUrl) {
     return (
-      <iframe className="lightbox-media lightbox-pdf" src={entry.contentUrl} title={entry.name} />
+      <iframe
+        className="absolute inset-x-4 top-16 bottom-4 size-auto rounded-md border-0 bg-foreground object-contain max-sm:inset-x-0 max-sm:bottom-0"
+        src={entry.contentUrl}
+        title={entry.name}
+      />
     )
   }
   // Generated previews are static WebP. Unknown WebP uses the original until classified so an
@@ -979,10 +1062,17 @@ function LightboxMedia({ entry }: { entry: Entry }) {
     (entry.mimeType === "image/webp" && entry.isAnimated !== false)
   const src = originalImage ? entry.contentUrl : (entry.previewUrl ?? entry.contentUrl)
   if (entry.previewKind === "image" && src) {
-    return <img className="lightbox-media" src={src} alt={entry.name} draggable={false} />
+    return (
+      <img
+        className="absolute inset-x-4 top-16 bottom-4 size-auto object-contain max-sm:inset-x-0 max-sm:bottom-0"
+        src={src}
+        alt={entry.name}
+        draggable={false}
+      />
+    )
   }
   return (
-    <div className="lightbox-empty">
+    <div className="absolute inset-0 grid place-content-center justify-items-center gap-3.5 text-muted-foreground">
       <FileIcon size={44} strokeWidth={1.2} />
       <span>No preview for this file</span>
       <Button variant="outline" onClick={() => void actions.download(entry.id)}>
@@ -1010,14 +1100,17 @@ function MoveDialog({ source }: { source: Entry | null }) {
         }
       }}
     >
-      <DialogContent className="move-dialog">
+      <DialogContent className="gap-3">
         <DialogHeader>
           <DialogTitle>Move “{source?.name}”</DialogTitle>
           <DialogDescription>Open the destination folder, then choose Move here.</DialogDescription>
         </DialogHeader>
-        <nav className="move-breadcrumb" aria-label="Destination">
+        <nav
+          className="flex gap-1.5 overflow-x-auto border-b border-border px-0.5 py-2 text-sm whitespace-nowrap text-muted-foreground [&_button]:border-0 [&_button]:bg-transparent [&_button]:p-0 [&_button]:text-inherit [&>span:last-child_button]:font-semibold [&>span:last-child_button]:text-foreground"
+          aria-label="Destination"
+        >
           {(listing?.breadcrumbs ?? []).map((crumb, index) => (
-            <span key={crumb.id ?? "root"} className="crumb">
+            <span key={crumb.id ?? "root"} className="inline-flex min-w-0 items-center gap-2">
               {index > 0 ? <span aria-hidden="true">/</span> : null}
               <button type="button" onClick={() => void actions.browseMove(crumb.id)}>
                 {crumb.name}
@@ -1025,8 +1118,12 @@ function MoveDialog({ source }: { source: Entry | null }) {
             </span>
           ))}
         </nav>
-        <div className="move-folders">
-          {folders.length === 0 ? <p className="move-empty">No folders here</p> : null}
+        <div className="grid min-h-52 max-h-[46vh] content-start overflow-y-auto [&>button]:flex [&>button]:items-center [&>button]:gap-2.5 [&>button]:rounded-md [&>button]:border-0 [&>button]:bg-transparent [&>button]:p-2.5 [&>button]:text-left [&>button]:text-foreground [&>button:hover]:bg-card [&>button_span]:flex-1 [&>button_span]:overflow-hidden [&>button_span]:text-ellipsis [&>button_span]:whitespace-nowrap">
+          {folders.length === 0 ? (
+            <p className="m-0 px-2.5 py-6 text-center text-sm text-muted-foreground">
+              No folders here
+            </p>
+          ) : null}
           {folders.map((folder) => (
             <button
               key={folder.id}
@@ -1034,7 +1131,7 @@ function MoveDialog({ source }: { source: Entry | null }) {
               onClick={() => void actions.browseMove(folder.id)}
             >
               <Folder size={18} /> <span>{folder.name}</span>
-              <ChevronRight size={16} className="move-chevron" />
+              <ChevronRight size={16} className="text-muted-foreground" />
             </button>
           ))}
         </div>

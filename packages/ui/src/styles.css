@@ -25,10 +25,10 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 0.25rem);
+  --radius-md: calc(var(--radius) - 0.125rem);
   --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  --radius-xl: calc(var(--radius) + 0.25rem);
 }
 
 :root {
@@ -76,7 +76,7 @@ html {
 }
 
 body {
-  min-width: 320px;
+  min-width: 20rem;
   min-height: 100vh;
   margin: 0;
   background: var(--carbon);
@@ -99,9 +99,9 @@ button {
   *,
   *::before,
   *::after {
-    scroll-behavior: auto !important;
-    transition-duration: 0.01ms !important;
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
+    scroll-behavior: auto;
+    transition-duration: 0s;
+    animation-duration: 0s;
+    animation-iteration-count: 1;
   }
 }
