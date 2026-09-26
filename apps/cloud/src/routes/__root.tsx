@@ -12,7 +12,10 @@ export const Route = createRootRoute({
       { name: "theme-color", content: "#0b0c0e" },
       { title: "CloudSync" },
     ],
-    links: [{ rel: "stylesheet", href: styles }],
+    links: [
+      { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
+      { rel: "stylesheet", href: styles },
+    ],
   }),
   component: Root,
 })
