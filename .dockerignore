@@ -1,0 +1,12 @@
+.git
+**/node_modules
+**/.turbo
+**/.output
+**/dist
+**/dist-worker
+**/out
+**/*.log
+.env*
+docs
+infra
+apps/desktop/src

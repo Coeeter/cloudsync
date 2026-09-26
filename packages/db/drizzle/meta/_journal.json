@@ -1,0 +1,20 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1790421914543,
+      "tag": "0000_jittery_earthquake",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1790429116232,
+      "tag": "0001_natural_sort",
+      "breakpoints": true
+    }
+  ]
+}
