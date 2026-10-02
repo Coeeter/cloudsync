@@ -1,14 +1,14 @@
 # CloudFront object reads implementation
 
-Status: Local implementation complete and validated on 2026-10-02; production rollout authorized and in progress. Coordinated with [another project's plan](../../../other-project/docs/cloudfront-reads/plan.md).
+Status: Complete; committed, pushed, deployed and verified in production on 2026-10-02. Coordinated with another project's matching deployment.
 
 ## Completed
 
 - Worker and folder archive body reads use short-lived exact-object signed CloudFront URLs. File download tickets include signed attachment parameters instead of S3 presigned GETs.
 - Uploads remain S3 presigned PUTs; checksum HEAD and deletes remain direct S3 operations. Existing CloudFront viewer URLs/cookies retain their authorization and cache behavior.
-- The viewer-response download function is live on the development distribution and applies each filename per request without affecting shared cached object metadata.
+- The viewer-response download function is live on both development and production distributions and applies each filename per request without affecting shared cached object metadata.
 - Preview decode/container failures terminate after one attempt, remain visible, and are excluded from automatic requeue. Storage failures retain bounded retries; the attempt limit now counts claimed attempts correctly. Process termination remains retryable.
-- Production drafts are prepared under ignored `tmp/cloudfront-reads/prod/`; production CDN updates have been accepted.
+- Production snapshots and applied configuration are under ignored `tmp/cloudfront-reads/prod/`. The distribution and viewer-response function are deployed.
 
 ## Validation
 
@@ -18,15 +18,16 @@ Status: Local implementation complete and validated on 2026-10-02; production ro
 - Run the worker integration with `CLOUDSYNC_TEST_DATABASE_URL` pointing at a disposable localhost database and Doppler cloudsync/dev. For the folder HTTP check, set `DATABASE_URL` to the same database before launching and pass `--preserve-env=DATABASE_URL` to Doppler. Never use a production bucket/database. The integration test is skipped by default to prevent accidental external access.
 - Fresh root format, check, lint, test, build passed with the repository's Bun 1.4.2.
 
-## Remaining work: production rollout
+## Production verification
 
-1. Refresh drafts with `bun scripts/prepare-cloudfront-reads.ts prod`; create/update and publish the prepared function and associate it using a fresh distribution ETag.
-2. Wait for propagation and verify an existing file with a small signed range request, unsigned/expired/tampered denial, and per-request filename isolation.
-3. Deploy both web and worker; validate authenticated file/folder downloads and a tiny preview job.
-4. Monitor worker errors and direct S3 outgoing transfer. Existing terminal WebP failures are not retried automatically; this change prevents wasted retries and does not add a new animated WebP decoder.
+- Application commits `299d6c7` and `b6af228`; GitHub Actions run `37007958542` passed checks and image publication. Both web and worker run registry digest `sha256:2adf6f957b5ef16f834b8fe6dfb10c6ecae70ca112adc10de0b6b02cc8aa9175`. Public health check passed and web container is healthy.
+- Distribution `EPRODEXAMPLE00` and `cloudsync-download-response-prod` are deployed. Existing private file signed ranges and independent filenames passed; unsigned, altered and expired requests returned 403.
+- Two tiny temporary production fixtures exercised the deployed worker: PNG previews were generated; malformed WebP ended after one attempt. The deployed authenticated file RPC returned a CloudFront ticket and original bytes. The deployed folder route rejected unauthenticated access and returned an authenticated ZIP that passed `unzip -t`.
+- Temporary session, directory, entries, jobs, original objects and generated preview versions/markers were removed. The pre-existing job count was unchanged.
+- Existing terminal WebP failures remain visible. This change prevents wasted retries and does not add a new animated WebP decoder.
+- Actual savings need future billing evidence. No ongoing monitor or production schedule was enabled.
 
 ## Constraints
 
 Development without CloudFront signing credentials now needs a functioning unsigned HTTP file origin; a private MinIO bucket alone cannot replace the removed S3 presigned GET fallback. The documented real AWS development CDN is supported and validated.
 
-Production runtime, rollout, and post-rollout costs remain unverified until rollout verification.

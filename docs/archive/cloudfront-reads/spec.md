@@ -8,4 +8,4 @@ Direction approved by Nas on 2026-10-02: move raw S3 body reads and downloads to
 - Preserve streaming, cancellation, filenames including Unicode, content types, and video ranges.
 - Never fall back to direct S3 reads after a CDN failure. Never expose signing credentials or signed URLs in logs.
 - Permanent preview processing failures stop after their first attempt; transient storage/network failures retain bounded retries.
-- Production deployment and IAM changes require separate authorization. Development infrastructure changes may be used for validation.
+- Production rollout was separately authorized by Nas and completed on 2026-10-02. IAM permissions were unchanged. Development infrastructure changes may be used for validation.
