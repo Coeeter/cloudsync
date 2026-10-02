@@ -113,7 +113,7 @@ integration("Preview worker with real persistence and development CDN", () => {
                 )
                 await client.delete(schema.entries).where(inArray(schema.entries.id, ids))
               })
-            }),
+            }).pipe(Effect.orDie),
           ),
         )
       }).pipe(Effect.provide(layer)),
