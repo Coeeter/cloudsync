@@ -1,7 +1,6 @@
+import { Readable } from "node:stream"
 import {
   DeleteObjectCommand,
-  GetObjectCommand,
-  type GetObjectOutput,
   HeadObjectCommand,
   type HeadObjectOutput,
   PutObjectCommand,
@@ -41,7 +40,7 @@ export interface StorageShape {
     StorageError
   >
   readonly head: (objectKey: string) => Effect.Effect<HeadObjectOutput, StorageError>
-  readonly get: (objectKey: string) => Effect.Effect<GetObjectOutput, StorageError>
+  readonly get: (objectKey: string) => Effect.Effect<{ readonly body: Readable }, StorageError>
   readonly put: (
     objectKey: string,
     body: Uint8Array,
@@ -140,11 +139,6 @@ export class Storage extends Context.Service<Storage, StorageShape>()("@cloudsyn
           ),
         )
 
-      const get: StorageShape["get"] = (objectKey) =>
-        send("get", () =>
-          client.send(new GetObjectCommand({ Bucket: config.s3Bucket, Key: objectKey })),
-        )
-
       const put: StorageShape["put"] = (objectKey, body, contentType) =>
         send("put", () =>
           client.send(
@@ -175,40 +169,81 @@ export class Storage extends Context.Service<Storage, StorageShape>()("@cloudsyn
         return new Date(Math.ceil((Date.now() + window) / window) * window)
       }
 
-      const viewUrl: StorageShape["viewUrl"] = Effect.fn("Storage.viewUrl")(function* (objectKey) {
-        if (signing._tag === "Signed") {
-          return getCloudFrontSignedUrl({
-            url: publicObjectUrl(objectKey),
-            keyPairId: signing.keyPairId,
-            privateKey: Redacted.value(signing.privateKeyPem),
-            dateLessThan: viewExpiry().toISOString(),
-          })
-        }
-        return yield* send("viewUrl", () =>
-          getSignedUrl(client, new GetObjectCommand({ Bucket: config.s3Bucket, Key: objectKey }), {
-            expiresIn: 2 * VIEW_TTL_SECONDS,
-            signingDate: new Date(viewExpiry().getTime() - 2 * VIEW_TTL_SECONDS * 1000),
-          }),
-        )
-      })
+      const viewUrl: StorageShape["viewUrl"] = Effect.fn("Storage.viewUrl")((objectKey) =>
+        Effect.try({
+          try: () =>
+            signing._tag === "Signed"
+              ? getCloudFrontSignedUrl({
+                  url: publicObjectUrl(objectKey),
+                  keyPairId: signing.keyPairId,
+                  privateKey: Redacted.value(signing.privateKeyPem),
+                  dateLessThan: viewExpiry().toISOString(),
+                })
+              : publicObjectUrl(objectKey),
+          catch: () =>
+            new StorageError({
+              operation: "viewUrl",
+              message: "Could not sign the CloudFront view",
+              cause: null,
+            }),
+        }),
+      )
 
-      // CloudFront does not forward response-content-disposition to the origin, so explicit
-      // downloads are presigned against S3 to get an attachment with the logical file name.
+      const readUrl = (objectKey: string, expiresAt: Date, fileName?: string) => {
+        const url = new URL(publicObjectUrl(objectKey))
+        if (fileName) {
+          const fallback = fileName.replaceAll(/[^\x20-\x7e]|["\\]/g, "_")
+          url.searchParams.set(
+            "response-content-disposition",
+            `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+          )
+        }
+        if (signing._tag === "LocalUnsigned") return url.toString()
+        return getCloudFrontSignedUrl({
+          url: url.toString(),
+          keyPairId: signing.keyPairId,
+          privateKey: Redacted.value(signing.privateKeyPem),
+          dateLessThan: expiresAt.toISOString(),
+        })
+      }
+
+      const get: StorageShape["get"] = (objectKey) =>
+        Effect.tryPromise({
+          try: async (signal) => {
+            const url = readUrl(objectKey, new Date(Date.now() + DOWNLOAD_TTL_SECONDS * 1000))
+            const response = await fetch(url, {
+              signal,
+              redirect: "error",
+              headers: { "accept-encoding": "identity" },
+            })
+            if (!response.ok) throw new Error(`CloudFront returned HTTP ${response.status}`)
+            if (!response.body) throw new Error("CloudFront returned an empty body")
+            return {
+              body: Readable.fromWeb(
+                response.body as unknown as import("node:stream/web").ReadableStream<Uint8Array>,
+              ),
+            }
+          },
+          catch: () =>
+            new StorageError({
+              operation: "get",
+              message: "Could not read the CloudFront object",
+              cause: null,
+            }),
+        })
+
       const downloadUrl: StorageShape["downloadUrl"] = Effect.fn("Storage.downloadUrl")(
         function* (objectKey, fileName) {
           const expiresAt = new Date(Date.now() + DOWNLOAD_TTL_SECONDS * 1000)
-          const fallback = fileName.replaceAll(/[^\x20-\x7e]|["\\]/g, "_")
-          const url = yield* send("downloadUrl", () =>
-            getSignedUrl(
-              client,
-              new GetObjectCommand({
-                Bucket: config.s3Bucket,
-                Key: objectKey,
-                ResponseContentDisposition: `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+          const url = yield* Effect.try({
+            try: () => readUrl(objectKey, expiresAt, fileName),
+            catch: () =>
+              new StorageError({
+                operation: "downloadUrl",
+                message: "Could not sign the CloudFront download",
+                cause: null,
               }),
-              { expiresIn: DOWNLOAD_TTL_SECONDS },
-            ),
-          )
+          })
           return { url, expiresAt }
         },
       )

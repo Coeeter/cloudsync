@@ -49,7 +49,7 @@ Pin one matching Effect v4 RC package set and use its shipped documentation as t
 - All stages implemented and deployed; owner validated the web flows and desktop ingestion in dev. Infrastructure (Doppler `cloudsync` dev/prod, mirrored private S3 buckets, OAC-only CloudFront at `files-dev.example.com` and `files.example.com`, ACM certificate).
 - Dev runs against local PostgreSQL (`compose.dev.yml`) and the real AWS dev bucket; `bun run dev` starts the web app and the preview worker.
 - PIN emails always go through Resend. The former `DEV_AUTH_CODE` bypass was removed; the unused Doppler value can be deleted.
-- Explicit downloads use short-lived S3 presigned URLs with an attachment `Content-Disposition`, because CloudFront does not forward `response-content-disposition`. Thumbnails, previews, and viewer media go through CloudFront.
+- All file-body reads and explicit downloads use CloudFront. Download URLs are signed for the exact object and attachment filename; a viewer-response function applies the filename per request. Uploads, metadata checks and deletes remain on S3. The update is validated in development; production rollout is tracked in [the active plan](../cloudfront-reads/plan.md).
 - Verified: presigned browser PUT with SHA-256 checksum against the dev bucket, keyset pagination against real data, Recycle Bin browsing, the production image (web + worker) against real Postgres and S3, and the public deployment (TLS, health, RPC, unsigned CDN requests rejected).
 
 ## Production

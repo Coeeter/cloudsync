@@ -13,3 +13,6 @@ coverage/
 apps/desktop/.cloudsync-dev/
 
 dist-worker/
+
+# Generated CloudFront rollout snapshots
+tmp/

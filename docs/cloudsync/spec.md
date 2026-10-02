@@ -75,3 +75,7 @@ CloudSync is a private, single-owner cloud archive. A macOS desktop app drains o
 - The desktop app is a locally packaged Apple Silicon Electron application placed in `~/Applications` by the owner.
 - The repository includes production Docker configuration suitable for publishing to a registry and running on Dokploy.
 - Runtime secrets live in Doppler. Code and logs never print secret values.
+
+## File delivery
+
+Worker inputs, streamed folder archive sources, and explicit file downloads use authenticated CloudFront delivery. Download links are short-lived and scoped to the exact file and filename. Uploads remain direct S3 presigned PUTs. Permanent preview decode failures terminate on the first attempt and remain visible; transient storage failures retain bounded retries.

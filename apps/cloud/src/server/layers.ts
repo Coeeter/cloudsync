@@ -1,5 +1,4 @@
 import { resolve } from "node:path"
-import type { Readable } from "node:stream"
 import { Database } from "@cloudsync/db"
 import { CloudSyncRpcs } from "@cloudsync/domain"
 import { ZipArchive } from "archiver"
@@ -145,11 +144,11 @@ const FolderDownloadRoute = HttpRouter.add(
           continue
         }
         const object = yield* storage.get(entry.objectKey)
-        if (!object.Body) continue
+
         // archiver queues appends; waiting for each entry keeps a single S3 stream open
         // instead of one socket per file in large folders.
         const written = entryWritten(archive)
-        archive.append(object.Body as Readable, { name: entry.path })
+        archive.append(object.body, { name: entry.path })
         yield* written
       }
       yield* Effect.tryPromise({

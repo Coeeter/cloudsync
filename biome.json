@@ -8,7 +8,8 @@
       "!!**/dist",
       "!!**/dist-worker",
       "!!**/out",
-      "!!**/.turbo"
+      "!!**/.turbo",
+      "!!**/tmp"
     ]
   },
   "formatter": {

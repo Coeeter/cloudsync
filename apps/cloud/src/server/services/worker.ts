@@ -1,10 +1,10 @@
-import type { GetObjectOutput } from "@aws-sdk/client-s3"
+import type { Readable } from "node:stream"
 import { isAnimatedWebP } from "@cloudsync/core"
 import { Database, type DatabaseError, schema } from "@cloudsync/db"
 import { and, eq, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm"
 import { Context, Effect, FileSystem, Layer, Path, Schema, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
-import { Storage, type StorageError } from "./storage"
+import { Storage, StorageError } from "./storage"
 
 const PreviewPayload = Schema.Struct({ entryId: Schema.String })
 const DeletePayload = Schema.Struct({ objectKeys: Schema.Array(Schema.String) })
@@ -35,6 +35,14 @@ class WorkerJobError extends Schema.TaggedError<WorkerJobError>()("WorkerJobErro
   cause: Schema.Defect(),
 }) {}
 
+export class PreviewDecodeError extends Schema.TaggedError<PreviewDecodeError>()(
+  "PreviewDecodeError",
+  {
+    message: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {}
+
 export interface WorkerShape {
   readonly run: Effect.Effect<never, WorkerFailure>
   readonly runOnce: Effect.Effect<boolean, WorkerFailure>
@@ -46,7 +54,7 @@ function extractedFrame(
   spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
   fileSystem: FileSystem.FileSystem,
   path: Path.Path,
-): Effect.Effect<Uint8Array, WorkerJobError> {
+): Effect.Effect<Uint8Array, WorkerJobError | PreviewDecodeError> {
   return Effect.gen(function* () {
     const directory = yield* fileSystem
       .makeTempDirectoryScoped({ prefix: "cloudsync-preview-" })
@@ -115,11 +123,16 @@ function extractedFrame(
       ),
     )
     if (exitCode !== ChildProcessSpawner.ExitCode(0)) {
-      return yield* new WorkerJobError({
-        message: diagnostics.trim() || `${kind} preview command exited with ${exitCode}`,
-        cause: null,
-      })
+      const message = diagnostics.trim() || `${kind} preview command exited with ${exitCode}`
+      if (
+        exitCode === ChildProcessSpawner.ExitCode(137) ||
+        exitCode === ChildProcessSpawner.ExitCode(143)
+      ) {
+        return yield* new WorkerJobError({ message, cause: null })
+      }
+      return yield* new PreviewDecodeError({ message, cause: null })
     }
+
     return yield* fileSystem
       .readFile(output)
       .pipe(
@@ -130,16 +143,25 @@ function extractedFrame(
   }).pipe(Effect.scoped)
 }
 
-function readObjectBody(body: NonNullable<GetObjectOutput["Body"]>) {
+function readObjectBody(body: Readable) {
   return Effect.tryPromise({
-    try: async () => {
-      if ("transformToByteArray" in body && typeof body.transformToByteArray === "function") {
-        return new Uint8Array(await body.transformToByteArray())
+    try: async (signal) => {
+      const abort = () => body.destroy(new Error("Object read cancelled"))
+      signal.addEventListener("abort", abort, { once: true })
+      try {
+        const chunks: Uint8Array[] = []
+        for await (const chunk of body) chunks.push(chunk)
+        return new Uint8Array(Buffer.concat(chunks))
+      } finally {
+        signal.removeEventListener("abort", abort)
       }
-      if (body instanceof Blob) return new Uint8Array(await body.arrayBuffer())
-      throw new Error("Unsupported S3 response body")
     },
-    catch: (cause) => new WorkerJobError({ message: "Could not read the stored object", cause }),
+    catch: () =>
+      new StorageError({
+        operation: "get",
+        message: "Could not read the CloudFront object body",
+        cause: null,
+      }),
   })
 }
 
@@ -203,16 +225,16 @@ export class Worker extends Context.Service<Worker, WorkerShape>()("@cloudsync/c
         if (!entry?.objectKey || !entry.mimeType) return
         const objectKey = entry.objectKey
         const object = yield* storage.get(objectKey)
-        if (!object.Body) {
-          return yield* new WorkerJobError({ message: "Object body was empty", cause: null })
-        }
-        const original = yield* readObjectBody(object.Body)
+        const original = yield* readObjectBody(object.body)
         const isWebP = entry.mimeType === "image/webp"
         const isAnimated = isWebP
           ? yield* Effect.try({
               try: () => isAnimatedWebP(original),
-              catch: (cause) =>
-                new WorkerJobError({ message: "Could not inspect the WebP container", cause }),
+              catch: () =>
+                new PreviewDecodeError({
+                  message: "Could not inspect the WebP container",
+                  cause: null,
+                }),
             })
           : null
         const source = entry.mimeType.startsWith("video/")
@@ -228,8 +250,8 @@ export class Worker extends Context.Service<Worker, WorkerShape>()("@cloudsync/c
               .resize(480, 480, { fit: "inside", withoutEnlargement: true })
               .webp({ quality: 78 })
               .bytes(),
-          catch: (cause) =>
-            new WorkerJobError({ message: "Could not render the thumbnail", cause }),
+          catch: () =>
+            new PreviewDecodeError({ message: "Could not render the thumbnail", cause: null }),
         })
         const preview = yield* Effect.tryPromise({
           try: () =>
@@ -237,7 +259,8 @@ export class Worker extends Context.Service<Worker, WorkerShape>()("@cloudsync/c
               .resize(2200, 2200, { fit: "inside", withoutEnlargement: true })
               .webp({ quality: 86 })
               .bytes(),
-          catch: (cause) => new WorkerJobError({ message: "Could not render the preview", cause }),
+          catch: () =>
+            new PreviewDecodeError({ message: "Could not render the preview", cause: null }),
         })
         // A fresh key per generation lets delivery mark previews immutable.
         const generation = crypto.randomUUID()
@@ -307,7 +330,7 @@ export class Worker extends Context.Service<Worker, WorkerShape>()("@cloudsync/c
           ),
           Effect.catch((cause) =>
             Effect.gen(function* () {
-              const terminal = job.attempts + 1 >= 5
+              const terminal = cause instanceof PreviewDecodeError || job.attempts >= 5
               yield* database.execute("worker.fail", (db) =>
                 db
                   .update(schema.jobs)
