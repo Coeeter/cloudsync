@@ -13,7 +13,7 @@ RUN bunx turbo run build --filter=@cloudsync/cloud
 
 FROM oven/bun:1.4.2-debian AS runtime
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg poppler-utils ca-certificates \
+  && apt-get install -y --no-install-recommends ffmpeg poppler-utils webp ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV NODE_ENV=production \

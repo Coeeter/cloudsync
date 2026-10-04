@@ -67,7 +67,7 @@ function extractedFrame(
       directory,
       kind === "pdf" ? "input.pdf" : kind === "webp" ? "input.webp" : "input.video",
     )
-    const output = path.join(directory, "frame.jpg")
+    const output = path.join(directory, kind === "webp" ? "frame.webp" : "frame.jpg")
     yield* fileSystem
       .writeFile(input, bytes)
       .pipe(
@@ -76,30 +76,33 @@ function extractedFrame(
         ),
       )
     const command =
-      kind !== "pdf"
+      kind === "video"
         ? ChildProcess.make("ffmpeg", [
             "-hide_banner",
             "-loglevel",
             "error",
             "-i",
             input,
-            // Videos use a representative frame; animated WebP stops after its first frame.
-            ...(kind === "video" ? ["-vf", "thumbnail"] : []),
+            "-vf",
+            "thumbnail",
             "-frames:v",
             "1",
             "-y",
             output,
           ])
-        : ChildProcess.make("pdftoppm", [
-            "-f",
-            "1",
-            "-singlefile",
-            "-jpeg",
-            "-scale-to",
-            "2200",
-            input,
-            path.join(directory, "frame"),
-          ])
+        : kind === "webp"
+          ? // Debian's ffmpeg and Bun.Image cannot decode animated WebP; the first frame is a still WebP.
+            ChildProcess.make("webpmux", ["-get", "frame", "1", input, "-o", output])
+          : ChildProcess.make("pdftoppm", [
+              "-f",
+              "1",
+              "-singlefile",
+              "-jpeg",
+              "-scale-to",
+              "2200",
+              input,
+              path.join(directory, "frame"),
+            ])
     const handle = yield* spawner
       .spawn(command)
       .pipe(
@@ -323,7 +326,14 @@ export class Worker extends Context.Service<Worker, WorkerShape>()("@cloudsync/c
               : Effect.fail(
                   new WorkerJobError({ message: `Unknown job kind: ${job.kind}`, cause: null }),
                 )
-        ).pipe(Effect.asVoid)
+        ).pipe(
+          Effect.asVoid,
+          // Must stay under the 15-minute lock so a stalled job is retried rather than held forever.
+          Effect.timeout("10 minutes"),
+          Effect.catchTag("TimeoutError", (cause) =>
+            Effect.fail(new WorkerJobError({ message: "Job timed out after 10 minutes", cause })),
+          ),
+        )
 
         return task.pipe(
           Effect.tap(() =>

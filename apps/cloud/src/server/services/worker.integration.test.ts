@@ -32,15 +32,22 @@ integration("Preview worker with real persistence and development CDN", () => {
     const goodId = crypto.randomUUID()
     const missingId = crypto.randomUUID()
     const mislabelledId = crypto.randomUUID()
-    const ids = [badId, goodId, missingId, mislabelledId]
+    const animatedId = crypto.randomUUID()
+    const ids = [badId, goodId, missingId, mislabelledId, animatedId]
     const badKey = `objects/cdn-validation/${badId}.webp`
     const goodKey = `objects/cdn-validation/${goodId}.png`
     const missingKey = `objects/cdn-validation/${missingId}.png`
     const mislabelledKey = `objects/cdn-validation/${mislabelledId}.webp`
-    const keys = [badKey, goodKey, mislabelledKey]
+    const animatedKey = `objects/cdn-validation/${animatedId}.webp`
+    const keys = [badKey, goodKey, mislabelledKey, animatedKey]
     const badWebP = Buffer.from("524946460c00000057454250414e494d00000000", "hex")
     const png = Buffer.from(
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZXkAAAAASUVORK5CYII=",
+      "base64",
+    )
+    // Two-frame 16px animation from img2webp; ffmpeg 5.x and Bun.Image both fail to decode it.
+    const animatedWebP = Buffer.from(
+      "UklGRmwBAABXRUJQVlA4WAoAAAACAAAADwAADwAAQU5JTQYAAAD/////AABBTk1G2AAAAAAAAAAAAA8AAA8AAGQAAAJWUDggwAAAAHADAJ0BKhAAEAAEAGglsAJ0fwqwDQkvYa+wD2qgclmdzZO3gAD+6l3NgkZsMvb0xYSdnapjb+kV5nUjtAmtQqco76+j2W/PPx9yxnFv2cz9eVAq+WB8fUJnZAosBdIVkLdICu9miWIWy3hataH1tBxbFgZd0UL+UTbo9APgOej8g0Up/iG+VPaxndh+3EMjVmEdtJr0UWib1BgcC/2u0HJU8vwAyf8L1R5uYzS2Pf/ZrPxqv4b/6vgQfteqgNrMAEFOTUZgAAAAAAAABgAADwAAAgAAZAAAAFZQOCBIAAAAtAIAnQEqEAADAAAAaCWwAnRzAXIBv/+YAAcNZ36AAP7KEo+az6R288XgfufueG64Ht9WlZKI/+Gh6U/zbVuf8Bwni7CUxAAA",
       "base64",
     )
     await Effect.runPromise(
@@ -52,6 +59,7 @@ integration("Preview worker with real persistence and development CDN", () => {
           yield* storage.put(badKey, badWebP, "image/webp")
           yield* storage.put(goodKey, png, "image/png")
           yield* storage.put(mislabelledKey, png, "image/webp")
+          yield* storage.put(animatedKey, animatedWebP, "image/webp")
           yield* db.execute("fixture", async (client) => {
             await client.insert(schema.entries).values(
               ids.map((id, index) => ({
@@ -59,9 +67,9 @@ integration("Preview worker with real persistence and development CDN", () => {
                 name: `fixture-${id}`,
                 normalizedName: `fixture-${id}`,
                 kind: "file" as const,
-                objectKey: [badKey, goodKey, missingKey, mislabelledKey][index],
-                mimeType: index === 0 || index === 3 ? "image/webp" : "image/png",
-                size: index === 0 ? badWebP.length : png.length,
+                objectKey: [badKey, goodKey, missingKey, mislabelledKey, animatedKey][index],
+                mimeType: [0, 3, 4].includes(index) ? "image/webp" : "image/png",
+                size: [badWebP, png, png, png, animatedWebP][index]?.length ?? 0,
               })),
             )
             await client
@@ -97,6 +105,13 @@ integration("Preview worker with real persistence and development CDN", () => {
           expect(mislabelled.previewError).toBeNull()
           expect(mislabelled.isAnimated).toBe(false)
           keys.push(mislabelled.thumbnailKey, mislabelled.previewKey)
+          const animated = rows.find((row) => row.id === animatedId)
+          if (!animated?.thumbnailKey || !animated.previewKey)
+            return yield* Effect.die(
+              `Animated WebP did not get a preview: ${animated?.previewError}`,
+            )
+          expect(animated.isAnimated).toBe(true)
+          keys.push(animated.thumbnailKey, animated.previewKey)
           const object = yield* storage.get(good.thumbnailKey)
           const header = yield* Effect.promise(async () => {
             const chunks = []
