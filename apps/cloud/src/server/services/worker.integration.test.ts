@@ -95,7 +95,7 @@ integration("Preview worker with real persistence and development CDN", () => {
             return Buffer.concat(chunks).subarray(0, 4).toString()
           })
           expect(header).toBe("RIFF")
-          // A second sweep cannot requeue a terminal decode error.
+          // Terminal decode errors are not retried, and the download retry is delayed.
           expect(yield* worker.runOnce).toBe(false)
         }).pipe(
           Effect.ensuring(

@@ -437,19 +437,25 @@ export class Worker extends Context.Service<Worker, WorkerShape>()("@cloudsync/c
         }),
       )
 
-      let cycles = 0
       const runOnce = Effect.gen(function* () {
-        cycles += 1
-        if (cycles === 1 || cycles % 3600 === 0) yield* sweep
         const job = yield* claim
         if (!job) return false
         yield* processJob(job)
         return true
       }).pipe(Effect.withSpan("Worker.runOnce"))
 
-      const run = runOnce.pipe(
+      const consume = runOnce.pipe(
         Effect.flatMap((worked) => (worked ? Effect.void : Effect.sleep("1 second"))),
         Effect.forever,
+      )
+      const maintenance = Effect.sleep("1 hour").pipe(Effect.andThen(sweep), Effect.forever)
+      const run = sweep.pipe(
+        Effect.andThen(Effect.logInfo("Starting worker with 4 concurrent job processors")),
+        Effect.andThen(
+          Effect.all([consume, consume, consume, consume, maintenance], { concurrency: 5 }).pipe(
+            Effect.forever,
+          ),
+        ),
       )
       return Worker.of({ run, runOnce })
     }),

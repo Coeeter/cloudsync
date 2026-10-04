@@ -29,5 +29,4 @@ Status: Complete; committed, pushed, deployed and verified in production on 2026
 
 ## Constraints
 
-Development without CloudFront signing credentials now needs a functioning unsigned HTTP file origin; a private MinIO bucket alone cannot replace the removed S3 presigned GET fallback. The documented real AWS development CDN is supported and validated.
-
+Development uses the real AWS development CDN and signing credentials from Doppler `cloudsync/dev`. See [development setup](../../cloudsync/development.md) for runtime and validation commands.
