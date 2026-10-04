@@ -1,5 +1,11 @@
 import type { PreparedUpload } from "@cloudsync/core"
-import { CloudSyncError, CloudSyncRpcs, type Entry, type UploadTicket } from "@cloudsync/domain"
+import {
+  CloudSyncError,
+  CloudSyncRpcs,
+  type Entry,
+  type UploadTicket,
+  type ObjectUploadTicket,
+} from "@cloudsync/domain"
 import { Context, Effect, Layer, Schema } from "effect"
 import {
   FetchHttpClient,
@@ -25,7 +31,7 @@ export interface RemoteShape {
     token: string,
     upload: PreparedUpload,
   ) => Effect.Effect<UploadTicket, RemoteError>
-  readonly put: (ticket: UploadTicket, bytes: Uint8Array) => Effect.Effect<void, RemoteError>
+  readonly put: (ticket: ObjectUploadTicket, bytes: Uint8Array) => Effect.Effect<void, RemoteError>
   readonly finalize: (token: string, uploadId: string) => Effect.Effect<Entry, RemoteError>
 }
 

@@ -63,6 +63,7 @@ export const uploads = pgTable(
     size: bigint("size", { mode: "number" }).notNull(),
     mimeType: text("mime_type").notNull(),
     checksumSha256: text("checksum_sha256").notNull(),
+    previewManifest: jsonb("preview_manifest"),
     modifiedAt: timestamp("modified_at", { withTimezone: true }).notNull(),
     status: uploadStatus("status").notNull().default("pending"),
     error: text("error"),

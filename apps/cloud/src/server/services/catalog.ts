@@ -4,6 +4,7 @@ import {
   nextAvailableName,
   previewKindForMime,
   sanitizeRelativePath,
+  uploadedPreviewKeys,
 } from "@cloudsync/core"
 import { type CloudSyncDatabase, Database, type DatabaseError, schema } from "@cloudsync/db"
 import {
@@ -16,6 +17,8 @@ import {
   SearchResponse,
   SearchResult,
   UploadTicket,
+  ObjectUploadTicket,
+  PreviewManifest,
 } from "@cloudsync/domain"
 import { and, eq, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm"
 import { Context, Effect, Layer, Schema } from "effect"
@@ -65,6 +68,7 @@ export interface CatalogShape {
     readonly mimeType: string
     readonly checksumSha256: string
     readonly modifiedAt: string
+    readonly previews?: PreviewManifest | undefined
   }) => Effect.Effect<UploadTicket, CatalogFailure>
   readonly finalizeUpload: (uploadId: string) => Effect.Effect<Entry, CatalogFailure>
   readonly download: (id: string) => Effect.Effect<DownloadTicket, CatalogFailure>
@@ -726,6 +730,19 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
             catch: () => invalidInput("Invalid relative path"),
           })
           if (parts.at(-1) === ".DS_Store") return yield* invalidInput(".DS_Store is ignored")
+          const previews = input.previews
+          if (
+            previews &&
+            (previewKindForMime(input.mimeType) === "none" ||
+              [previews.thumbnail, previews.preview].some(
+                (file) =>
+                  !Number.isSafeInteger(file.size) ||
+                  file.size <= 0 ||
+                  file.size > 32 * 1024 * 1024 ||
+                  !/^[A-Za-z0-9+/]{43}=$/.test(file.checksumSha256),
+              ))
+          )
+            return yield* invalidInput("Invalid preview manifest")
           const id = randomUUID()
           const objectKey = `objects/${id}`
           const expiresAt = new Date(Date.now() + 15 * 60 * 1000)
@@ -739,6 +756,7 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
               size: input.size,
               mimeType: input.mimeType || "application/octet-stream",
               checksumSha256: input.checksumSha256,
+              previewManifest: previews,
               modifiedAt: new Date(input.modifiedAt),
               expiresAt,
             })
@@ -748,12 +766,47 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
             input.mimeType,
             input.checksumSha256,
           )
+          const keys = uploadedPreviewKeys(id)
+          const previewTickets = previews
+            ? yield* Effect.all(
+                {
+                  thumbnail: storage
+                    .createUploadUrl(
+                      keys.thumbnail,
+                      "image/webp",
+                      previews.thumbnail.checksumSha256,
+                    )
+                    .pipe(
+                      Effect.map((signed) =>
+                        ObjectUploadTicket.make({
+                          ...signed,
+                          objectKey: keys.thumbnail,
+                          expiresAt: signed.expiresAt.toISOString(),
+                        }),
+                      ),
+                    ),
+                  preview: storage
+                    .createUploadUrl(keys.preview, "image/webp", previews.preview.checksumSha256)
+                    .pipe(
+                      Effect.map((signed) =>
+                        ObjectUploadTicket.make({
+                          ...signed,
+                          objectKey: keys.preview,
+                          expiresAt: signed.expiresAt.toISOString(),
+                        }),
+                      ),
+                    ),
+                },
+                { concurrency: 2 },
+              )
+            : undefined
           return UploadTicket.make({
             uploadId: id,
             objectKey,
             url: signed.url,
             headers: signed.headers,
             expiresAt: signed.expiresAt.toISOString(),
+            ...(previewTickets ? { previews: previewTickets } : {}),
           })
         },
       )
@@ -801,6 +854,29 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
             })
           }
 
+          const manifest = upload.previewManifest
+            ? yield* Schema.decodeUnknownEffect(PreviewManifest)(upload.previewManifest).pipe(
+                Effect.orElseSucceed(() => null),
+              )
+            : null
+          const keys = uploadedPreviewKeys(uploadId)
+          const verifiedPreviews = manifest
+            ? yield* Effect.forEach(
+                ["thumbnail", "preview"] as const,
+                (kind) =>
+                  storage.head(keys[kind]).pipe(
+                    Effect.map(
+                      (object) =>
+                        object.ContentLength === manifest[kind].size &&
+                        object.ChecksumSHA256 === manifest[kind].checksumSha256 &&
+                        object.ContentType === "image/webp",
+                    ),
+                    Effect.orElseSucceed(() => false),
+                  ),
+                { concurrency: 2 },
+              ).pipe(Effect.map((verified) => verified.every(Boolean)))
+            : false
+
           const entry = yield* run("upload.finalize", (db) =>
             db.transaction(async (tx) => {
               const [current] = await tx
@@ -838,6 +914,9 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
                   size: current.size,
                   checksumSha256: current.checksumSha256,
                   modifiedAt: current.modifiedAt,
+                  thumbnailKey: verifiedPreviews ? keys.thumbnail : null,
+                  previewKey: verifiedPreviews ? keys.preview : null,
+                  isAnimated: verifiedPreviews ? manifest?.isAnimated : null,
                 })
                 .returning()
               if (!created) throw new Error("File insert returned no row")
@@ -845,10 +924,16 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
                 .update(schema.uploads)
                 .set({ status: "finalized", entryId: created.id, updatedAt: new Date() })
                 .where(eq(schema.uploads.id, uploadId))
-              if (previewKindForMime(created.mimeType) !== "none") {
+              if (!verifiedPreviews && previewKindForMime(created.mimeType) !== "none") {
                 await tx
                   .insert(schema.jobs)
                   .values({ kind: "preview", payload: { entryId: created.id } })
+              }
+              if (current.previewManifest && !verifiedPreviews) {
+                await tx.insert(schema.jobs).values({
+                  kind: "delete_objects",
+                  payload: { objectKeys: Object.values(keys) },
+                })
               }
               return created
             }),

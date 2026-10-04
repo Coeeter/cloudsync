@@ -1,5 +1,5 @@
 import type { Readable } from "node:stream"
-import { isAnimatedWebP } from "@cloudsync/core"
+import { isAnimatedWebP, previewSettings, uploadedPreviewKeys } from "@cloudsync/core"
 import { Database, type DatabaseError, schema } from "@cloudsync/db"
 import { and, eq, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm"
 import { Context, Effect, FileSystem, Layer, Path, Schema, Stream } from "effect"
@@ -247,8 +247,11 @@ export class Worker extends Context.Service<Worker, WorkerShape>()("@cloudsync/c
         const thumbnail = yield* Effect.tryPromise({
           try: () =>
             new BunImage(source, { autoOrient: true })
-              .resize(480, 480, { fit: "inside", withoutEnlargement: true })
-              .webp({ quality: 78 })
+              .resize(previewSettings.thumbnail.size, previewSettings.thumbnail.size, {
+                fit: "inside",
+                withoutEnlargement: true,
+              })
+              .webp({ quality: previewSettings.thumbnail.quality })
               .bytes(),
           catch: () =>
             new PreviewDecodeError({ message: "Could not render the thumbnail", cause: null }),
@@ -256,8 +259,11 @@ export class Worker extends Context.Service<Worker, WorkerShape>()("@cloudsync/c
         const preview = yield* Effect.tryPromise({
           try: () =>
             new BunImage(source, { autoOrient: true })
-              .resize(2200, 2200, { fit: "inside", withoutEnlargement: true })
-              .webp({ quality: 86 })
+              .resize(previewSettings.preview.size, previewSettings.preview.size, {
+                fit: "inside",
+                withoutEnlargement: true,
+              })
+              .webp({ quality: previewSettings.preview.quality })
               .bytes(),
           catch: () =>
             new PreviewDecodeError({ message: "Could not render the preview", cause: null }),
@@ -408,11 +414,20 @@ export class Worker extends Context.Service<Worker, WorkerShape>()("@cloudsync/c
                 eq(schema.uploads.status, "pending"),
               ),
             )
-            .returning({ objectKey: schema.uploads.objectKey })
+            .returning({
+              id: schema.uploads.id,
+              objectKey: schema.uploads.objectKey,
+              previewManifest: schema.uploads.previewManifest,
+            })
           if (abandoned.length > 0) {
             await tx.insert(schema.jobs).values({
               kind: "delete_objects",
-              payload: { objectKeys: abandoned.map((upload) => upload.objectKey) },
+              payload: {
+                objectKeys: abandoned.flatMap((upload) => [
+                  upload.objectKey,
+                  ...(upload.previewManifest ? Object.values(uploadedPreviewKeys(upload.id)) : []),
+                ]),
+              },
             })
           }
           await tx.execute(sql`
@@ -421,7 +436,7 @@ export class Worker extends Context.Service<Worker, WorkerShape>()("@cloudsync/c
             from entries
             where entries.kind = 'file'
               and entries.deleted_at is null
-              and entries.thumbnail_key is null
+              and (entries.thumbnail_key is null or entries.preview_key is null)
               and entries.preview_error is null
               and (
                 entries.mime_type in ('image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif', 'application/pdf')

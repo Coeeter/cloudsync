@@ -16,6 +16,7 @@ import {
 import { Notification } from "electron"
 import { Remote } from "./remote"
 import { SizeQueue } from "./size-queue"
+import { createLocalPreviews } from "./preview"
 
 export interface InboxSnapshot {
   readonly watching: string | null
@@ -170,18 +171,44 @@ export class Inbox extends Context.Service<Inbox, InboxShape>()("@cloudsync/desk
           const bytes = yield* fileSystem
             .readFile(path)
             .pipe(Effect.mapError(inboxError(`Could not read ${relativePath}`)))
+          const mimeType = mimeFor(path)
+          const previews = yield* Effect.tryPromise({
+            try: (signal) => createLocalPreviews(bytes, mimeType, signal),
+            catch: (cause) => inboxError("Local preview generation failed")(cause),
+          }).pipe(
+            Effect.tapError(() => Effect.logWarning("Local preview failed; using worker fallback")),
+            Effect.orElseSucceed(() => null),
+          )
           yield* completeDirectUpload(
             {
               parentId: null,
               relativePath,
               size: stable.size,
-              mimeType: mimeFor(path),
+              mimeType,
               checksumSha256,
               modifiedAt: stable.modifiedAt.toISOString(),
+              ...(previews ? { previews: previews.manifest } : {}),
             },
             {
               begin: (upload) => remote.begin(sessionToken, upload),
-              put: (ticket) => remote.put(ticket, bytes),
+              put: (ticket) =>
+                Effect.gen(function* () {
+                  yield* remote.put(ticket, bytes)
+                  if (previews && ticket.previews) {
+                    yield* Effect.all(
+                      [
+                        remote.put(ticket.previews.thumbnail, previews.thumbnail),
+                        remote.put(ticket.previews.preview, previews.preview),
+                      ],
+                      { concurrency: 2 },
+                    ).pipe(
+                      Effect.tapError(() =>
+                        Effect.logWarning("Preview upload failed; using worker fallback"),
+                      ),
+                      Effect.ignore,
+                    )
+                  }
+                }),
               finalize: (uploadId) => remote.finalize(sessionToken, uploadId),
             },
           ).pipe(

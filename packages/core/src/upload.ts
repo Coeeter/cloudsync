@@ -1,4 +1,4 @@
-import type { Entry, UploadTicket } from "@cloudsync/domain"
+import type { Entry, PreviewManifest, UploadTicket } from "@cloudsync/domain"
 import { Effect } from "effect"
 
 export interface PreparedUpload {
@@ -8,6 +8,7 @@ export interface PreparedUpload {
   readonly mimeType: string
   readonly checksumSha256: string
   readonly modifiedAt: string
+  readonly previews?: PreviewManifest | undefined
 }
 
 export interface DirectUploadRemote<E> {

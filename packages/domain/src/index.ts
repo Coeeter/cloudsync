@@ -55,12 +55,30 @@ export class Session extends Schema.Class<Session>("Session")({
   token: Schema.optional(Schema.String),
 }) {}
 
-export class UploadTicket extends Schema.Class<UploadTicket>("UploadTicket")({
-  uploadId: Schema.String,
+export const PreviewManifest = Schema.Struct({
+  version: Schema.Literal(1),
+  thumbnail: Schema.Struct({ size: Schema.Finite, checksumSha256: Schema.String }),
+  preview: Schema.Struct({ size: Schema.Finite, checksumSha256: Schema.String }),
+  isAnimated: Schema.NullOr(Schema.Boolean),
+})
+export type PreviewManifest = typeof PreviewManifest.Type
+
+export class ObjectUploadTicket extends Schema.Class<ObjectUploadTicket>("ObjectUploadTicket")({
   objectKey: Schema.String,
   url: Schema.String,
   headers: Schema.Record(Schema.String, Schema.String),
   expiresAt: Schema.String,
+}) {}
+
+export class UploadTicket extends Schema.Class<UploadTicket>("UploadTicket")({
+  ...ObjectUploadTicket.fields,
+  uploadId: Schema.String,
+  previews: Schema.optional(
+    Schema.Struct({
+      thumbnail: ObjectUploadTicket,
+      preview: ObjectUploadTicket,
+    }),
+  ),
 }) {}
 
 export class DownloadTicket extends Schema.Class<DownloadTicket>("DownloadTicket")({
@@ -171,6 +189,7 @@ export const CloudSyncRpcs = RpcGroup.make(
       mimeType: Schema.String,
       checksumSha256: Schema.String,
       modifiedAt: Schema.String,
+      previews: Schema.optional(PreviewManifest),
     },
     success: UploadTicket,
     error: CloudSyncError,

@@ -44,6 +44,7 @@ CloudSync is a private, single-owner cloud archive. A macOS desktop app drains o
 - Image, animated image, video, and PDF previews are supported. Unknown formats use a generic file card and remain downloadable.
 - Stored originals are never modified. Processing produces uncropped grid thumbnails, larger lightbox previews, PDF first-page previews, and video poster frames.
 - A preview failure does not invalidate the uploaded original.
+- Desktop ingestion generates image, animated image, video, and PDF previews locally and uploads them alongside the original. Server finalization verifies both preview uploads before marking them ready. The worker handles missing or invalid previews, failed local conversions, and uploads from clients that do not provide previews.
 - Media opens in a keyboard-, pointer-, and touch-friendly viewer that follows the folder's natural order.
 
 ## Authentication and privacy
