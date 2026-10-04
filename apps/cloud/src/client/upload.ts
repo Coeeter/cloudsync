@@ -7,7 +7,7 @@ import {
   HttpClientRequest,
   HttpClientResponse,
 } from "effect/unstable/http"
-import { runRpc } from "./rpc"
+import { CloudSync } from "./rpc"
 
 export class BrowserUploadError extends Schema.TaggedError<BrowserUploadError>()(
   "BrowserUploadError",
@@ -134,16 +134,13 @@ export const uploadBrowserFile = Effect.fn("uploadBrowserFile")(function* (
     }),
   )
 
+  const client = yield* CloudSync
   const begin = (upload: PreparedUpload) =>
-    Effect.tryPromise({
-      try: () => runRpc((client) => client["upload.begin"]({ ...upload })),
-      catch: reason("Could not start the upload"),
-    })
+    client("upload.begin", upload).pipe(Effect.mapError(reason("Could not start the upload")))
   const finalize = (uploadId: string): Effect.Effect<Entry, BrowserUploadError> =>
-    Effect.tryPromise({
-      try: () => runRpc((client) => client["upload.finalize"]({ uploadId })),
-      catch: reason("Could not verify the upload"),
-    })
+    client("upload.finalize", { uploadId }).pipe(
+      Effect.mapError(reason("Could not verify the upload")),
+    )
   const put = (ticket: UploadTicket) =>
     Effect.gen(function* () {
       const client = yield* HttpClient.HttpClient

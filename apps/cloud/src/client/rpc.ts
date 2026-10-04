@@ -6,21 +6,15 @@ import {
   HttpClientRequest,
   HttpClientResponse,
 } from "effect/unstable/http"
-import { RpcClient, type RpcClientError, RpcSerialization } from "effect/unstable/rpc"
+import { AtomRpc } from "effect/unstable/reactivity"
+import { RpcClient, RpcSerialization } from "effect/unstable/rpc"
 
-const ProtocolLive = RpcClient.layerProtocolHttp({ url: "/rpc" }).pipe(
-  Layer.provide([FetchHttpClient.layer, RpcSerialization.layerJson]),
-)
-
-export type CloudClient = RpcClient.FromGroup<typeof CloudSyncRpcs, RpcClientError.RpcClientError>
-
-export function runRpc<A, E>(use: (client: CloudClient) => Effect.Effect<A, E>): Promise<A> {
-  return Effect.runPromise(
-    Effect.scoped(
-      RpcClient.make(CloudSyncRpcs).pipe(Effect.flatMap(use), Effect.provide(ProtocolLive)),
-    ),
-  )
-}
+export class CloudSync extends AtomRpc.Service<CloudSync>()("cloudsync/client/CloudSync", {
+  group: CloudSyncRpcs,
+  protocol: RpcClient.layerProtocolHttp({ url: "/rpc" }).pipe(
+    Layer.provide([FetchHttpClient.layer, RpcSerialization.layerJson]),
+  ),
+}) {}
 
 const postJson = (url: string, body: object) =>
   Effect.gen(function* () {

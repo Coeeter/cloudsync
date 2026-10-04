@@ -1,10 +1,18 @@
-import type { DirectoryListing, Entry, SearchResult, Session } from "@cloudsync/domain"
-import { Data, Effect } from "effect"
-import { Atom, AtomRegistry } from "effect/unstable/reactivity"
-import { establishSession, logout, runRpc } from "./rpc"
-import { collectDroppedFiles, uploadBrowserFile } from "./upload"
+import type { Breadcrumb, DirectoryListing, Entry } from "@cloudsync/domain"
+import { Array as Arr, Cause, Effect, Exit, Option, Predicate, Stream } from "effect"
+import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity"
+import { CloudSync, establishSession, logout } from "./rpc"
+import { collectDroppedFiles, type DroppedFile, uploadBrowserFile } from "./upload"
 
-export type AuthView = "checking" | "email" | "pin" | "authenticated"
+export const registry = AtomRegistry.make()
+
+const catalogKeys = ["catalog"]
+const sessionKeys = ["session"]
+/** The server's largest page; refreshes re-fetch at most this many entries in one request. */
+const maxPageSize = 600
+
+// UI state is written by route loaders before components subscribe, and unsubscribed atoms reset.
+const state = <A>(initial: A) => Atom.keepAlive(Atom.make<A>(initial))
 
 export interface UploadProgress {
   readonly done: number
@@ -12,32 +20,14 @@ export interface UploadProgress {
   readonly total: number
 }
 
-export const registry = AtomRegistry.make()
-
-// Route loaders write state before any component subscribes, and unsubscribed atoms reset.
-const state = <A>(initial: A) => Atom.keepAlive(Atom.make<A>(initial))
-
-export const authViewAtom = state<AuthView>("checking")
-export const emailAtom = state("")
-export const sessionAtom = state<Session | null>(null)
-export const listingAtom = state<DirectoryListing | null>(null)
-export const queryAtom = state("")
-export const searchResultsAtom = state<ReadonlyArray<SearchResult>>([])
-export const searchLoadingAtom = state(false)
-export const searchTruncatedAtom = state(false)
-export const recycleEntriesAtom = state<ReadonlyArray<Entry>>([])
-export const busyAtom = state(false)
 export const errorAtom = state<string | null>(null)
-export const noticeAtom = state<string | null>(null)
 export const uploadProgressAtom = state<UploadProgress | null>(null)
 export const dragActiveAtom = state(false)
-export const viewAtom = state<"files" | "recycle">("files")
-/** The Recycle Bin folder being browsed; null shows the Recycle Bin's top-level items. */
-export const recycleListingAtom = state<DirectoryListing | null>(null)
-export const loadingMoreAtom = state(false)
-export const activeEntryAtom = state<Entry | null>(null)
+export const searchQueryAtom = state("")
+export const debouncedSearchQueryAtom = Atom.debounce(searchQueryAtom, "180 millis")
+export const activeEntryIdAtom = state<string | null>(null)
 export const moveSourceAtom = state<Entry | null>(null)
-export const moveListingAtom = state<DirectoryListing | null>(null)
+export const moveFolderIdAtom = state<string | null>(null)
 export const newFolderOpenAtom = state(false)
 export const newFolderNameAtom = state("")
 export const renameEntryAtom = state<Entry | null>(null)
@@ -47,485 +37,304 @@ export const pendingDeleteAtom = state<{
   readonly permanent: boolean
 } | null>(null)
 
-const message = (error: unknown): string => {
-  if (error instanceof BrowserStateError) return message(error.cause)
-  if (typeof error === "object" && error !== null) {
-    if ("cause" in error && error.cause && typeof error.cause === "object" && "code" in error.cause)
-      return message(error.cause)
-    if ("message" in error && typeof error.message === "string" && error.message)
-      return error.message
-  }
-  return "The operation could not be completed"
-}
-
-class BrowserStateError extends Data.TaggedError("BrowserStateError")<{
-  readonly cause: unknown
-}> {}
-
-const attempt = <A>(tryPromise: () => Promise<A>) =>
-  Effect.tryPromise({
-    try: tryPromise,
-    catch: (cause) => new BrowserStateError({ cause }),
-  })
-
-const run = <A>(effect: Effect.Effect<A, unknown>) =>
-  Effect.runPromise(
-    effect.pipe(
-      Effect.tapError((error) => Effect.sync(() => registry.set(errorAtom, message(error)))),
-      Effect.ignore,
-    ),
+export const sessionAtom = CloudSync.runtime
+  .atom(
+    Effect.gen(function* () {
+      const client = yield* CloudSync
+      const session = yield* client("auth.session", {})
+      // Re-issues the short-lived CloudFront viewer cookies for a long-lived session.
+      yield* establishSession(undefined).pipe(Effect.ignore)
+      return session
+    }),
   )
+  .pipe(Atom.withReactivity(sessionKeys), Atom.keepAlive)
 
-const currentFolderId = () => registry.get(listingAtom)?.directory?.id ?? null
+export const requestPinAtom = CloudSync.runtime.fn((email: string) =>
+  CloudSync.use((client) => client("auth.requestPin", { email })),
+)
 
-// Keeps every page loaded so far, so returning to a folder renders the same height and the
-// router can restore the scroll position before the background refresh lands.
-const listingCache = new Map<string | null, DirectoryListing>()
+export const verifyPinAtom = CloudSync.runtime.fn(
+  Effect.fnUntraced(function* ({ email, code }: { email: string; code: string }) {
+    const client = yield* CloudSync
+    const session = yield* client("auth.verifyPin", { email, code, client: "web" })
+    yield* establishSession(session.token)
+  }),
+  { reactivityKeys: sessionKeys },
+)
 
-function setListing(listing: DirectoryListing) {
-  listingCache.set(listing.directory?.id ?? null, listing)
-  registry.set(listingAtom, listing)
-}
-
-let booted: Promise<void> | null = null
-let latestVisit = 0
+// A full reload drops every cached listing along with the session.
+export const signOut = () =>
+  Effect.runPromise(logout.pipe(Effect.ignore)).then(() => window.location.assign("/"))
 
 const needsPreview = (entry: Entry) => entry.kind === "file" && entry.previewStatus === "pending"
 
-let previewPoll: ReturnType<typeof setTimeout> | null = null
-let previewPollAttempts = 0
+const loadedCount = (previous: Option.Option<Atom.PullResult<DirectoryListing, unknown>>) =>
+  previous.pipe(
+    Option.flatMap(AsyncResult.value),
+    Option.map(({ items }) => items.reduce((count, page) => count + page.entries.length, 0)),
+    Option.filter((count) => count > 0),
+    Option.map((count) => Math.min(count, maxPageSize)),
+    Option.getOrUndefined,
+  )
 
-// The worker fills in thumbnails asynchronously after finalization; refresh quietly until they land.
-function schedulePreviewPoll(listing: DirectoryListing, reset: boolean) {
-  if (previewPoll) clearTimeout(previewPoll)
-  previewPoll = null
-  if (reset) previewPollAttempts = 0
-  if (!listing.entries.some(needsPreview)) return
-  previewPollAttempts += 1
-  const folderId = listing.directory?.id ?? null
-  const delay =
-    previewPollAttempts <= 5
-      ? 3000
-      : Math.min(30_000, 3000 * 2 ** Math.min(previewPollAttempts - 5, 4))
-  previewPoll = setTimeout(() => {
-    if (registry.get(viewAtom) !== "files" || currentFolderId() !== folderId) return
-    if (typeof document !== "undefined" && document.hidden) {
-      const current = registry.get(listingAtom)
-      if (current) schedulePreviewPoll(current, false)
-      return
-    }
-    const loaded = registry.get(listingAtom)?.entries.length ?? 0
-    void run(loadDirectory(folderId, { resetPoll: false, keepQuery: true, limit: loaded }))
-  }, delay)
+const listingPages = (parentId: string | null, firstPageSize: number | undefined) =>
+  Stream.paginate({ cursor: undefined as string | undefined, limit: firstPageSize }, (page) =>
+    CloudSync.use((client) => client("catalog.list", { parentId, ...page })).pipe(
+      Effect.map(
+        (listing) =>
+          [
+            [listing],
+            listing.nextCursor
+              ? Option.some({ cursor: listing.nextCursor, limit: undefined })
+              : Option.none(),
+          ] as const,
+      ),
+    ),
+  )
+
+/** Pages of a folder; writing to the atom loads the next page. */
+export const folderAtom = Atom.family((parentId: string | null) =>
+  // A refresh restarts the stream, so its first page covers everything already shown and the
+  // scroll position stays valid.
+  CloudSync.runtime
+    .pull((get) => listingPages(parentId, loadedCount(get.self())))
+    .pipe(Atom.withReactivity(catalogKeys), Atom.setIdleTTL("10 minutes")),
+)
+
+export const recycleBinAtom = CloudSync.query(
+  "catalog.recycleBin",
+  {},
+  { reactivityKeys: catalogKeys, timeToLive: "1 minute" },
+)
+
+export const trashedFolderAtom = Atom.family((parentId: string) =>
+  CloudSync.query(
+    "catalog.list",
+    { parentId, trashed: true, limit: maxPageSize },
+    { reactivityKeys: catalogKeys, timeToLive: "1 minute" },
+  ),
+)
+
+export const moveFolderAtom = Atom.family((parentId: string | null) =>
+  CloudSync.query(
+    "catalog.list",
+    { parentId, limit: maxPageSize },
+    { reactivityKeys: catalogKeys, timeToLive: "1 minute" },
+  ),
+)
+
+export const searchAtom = CloudSync.runtime
+  .atom((get) => {
+    const query = get(debouncedSearchQueryAtom).trim()
+    if (!query) return Effect.succeed(null)
+    return CloudSync.use((client) => client("catalog.search", { query, limit: 100 }))
+  })
+  .pipe(Atom.withReactivity(catalogKeys))
+
+export interface FolderView {
+  readonly directory: Entry | null
+  readonly breadcrumbs: ReadonlyArray<Breadcrumb>
+  readonly entries: ReadonlyArray<Entry>
+  readonly hasMore: boolean
+  readonly loaded: boolean
+  readonly waiting: boolean
+  readonly error: string | null
 }
 
-let searchRequest = 0
+const viewOf = <A, E>(
+  result: AsyncResult.AsyncResult<A, E>,
+  toView: (value: A) => Omit<FolderView, "loaded" | "waiting" | "error">,
+): FolderView => ({
+  ...Option.match(AsyncResult.value(result), {
+    onNone: () => ({ directory: null, breadcrumbs: [], entries: [], hasMore: false }),
+    onSome: toView,
+  }),
+  loaded: Option.isSome(AsyncResult.value(result)),
+  waiting: result.waiting,
+  error: AsyncResult.isFailure(result) ? describe(result.cause) : null,
+})
 
-export const actions = {
-  /** Runs once per page load; every route load waits on it before touching the catalog. */
-  boot: () =>
-    (booted ??= run(
-      attempt(() => runRpc((client) => client["auth.session"]({}))).pipe(
-        Effect.tap((session) =>
-          Effect.sync(() => {
-            registry.set(sessionAtom, session)
-            registry.set(authViewAtom, "authenticated")
-          }),
-        ),
-        // Re-issues the short-lived CloudFront viewer cookies for a long-lived session.
-        Effect.tap(() => establishSession(undefined).pipe(Effect.ignore)),
-        Effect.catch(() => Effect.sync(() => registry.set(authViewAtom, "email"))),
-      ),
-    )),
-
-  visit: (folder: string | null, recycle: boolean) => run(visit(folder, recycle)),
-
-  requestPin: (email: string) =>
-    run(
-      withBusy(
-        attempt(() => runRpc((client) => client["auth.requestPin"]({ email }))).pipe(
-          Effect.tap(() =>
-            Effect.sync(() => {
-              registry.set(emailAtom, email)
-              registry.set(authViewAtom, "pin")
-              registry.set(noticeAtom, null)
-            }),
-          ),
-        ),
-      ),
-    ),
-
-  resendPin: () => {
-    const email = registry.get(emailAtom)
-    return run(
-      withBusy(
-        attempt(() => runRpc((client) => client["auth.requestPin"]({ email }))).pipe(
-          Effect.tap(() => Effect.sync(() => registry.set(noticeAtom, `A new code was sent.`))),
-        ),
-      ),
-    )
-  },
-
-  changeEmail: () => {
-    registry.set(errorAtom, null)
-    registry.set(noticeAtom, null)
-    registry.set(authViewAtom, "email")
-  },
-
-  verifyPin: (code: string) =>
-    run(
-      withBusy(
-        attempt(() =>
-          runRpc((client) =>
-            client["auth.verifyPin"]({ email: registry.get(emailAtom), code, client: "web" }),
-          ),
-        ).pipe(
-          Effect.flatMap((session) => establishSession(session.token).pipe(Effect.as(session))),
-          Effect.tap((session) =>
-            Effect.sync(() => {
-              registry.set(sessionAtom, session)
-              registry.set(noticeAtom, null)
-              registry.set(authViewAtom, "authenticated")
-            }),
-          ),
-        ),
-      ),
-    ),
-
-  logout: () =>
-    run(
-      logout.pipe(
-        Effect.ensuring(
-          Effect.sync(() => {
-            registry.set(sessionAtom, null)
-            registry.set(listingAtom, null)
-            listingCache.clear()
-            registry.set(errorAtom, null)
-            registry.set(authViewAtom, "email")
-          }),
-        ),
-      ),
-    ),
-
-  dismissError: () => registry.set(errorAtom, null),
-
-  refresh: () => run(loadDirectory(currentFolderId(), { keepQuery: true })),
-
-  showFiles: () => run(withBusy(loadDirectory(currentFolderId()))),
-
-  showRecycleBin: () =>
-    run(
-      withBusy(
-        attempt(() => runRpc((client) => client["catalog.recycleBin"]({}))).pipe(
-          Effect.tap((entries) =>
-            Effect.sync(() => {
-              registry.set(viewAtom, "recycle")
-              registry.set(recycleListingAtom, null)
-              registry.set(recycleEntriesAtom, entries)
-              registry.set(queryAtom, "")
-            }),
-          ),
-        ),
-      ),
-    ),
-
-  openRecycleFolder: (id: string | null) => {
-    if (id === null) return actions.showRecycleBin()
-    return run(
-      withBusy(
-        attempt(() =>
-          runRpc((client) => client["catalog.list"]({ parentId: id, trashed: true, limit: 600 })),
-        ).pipe(
-          Effect.tap((listing) => Effect.sync(() => registry.set(recycleListingAtom, listing))),
-        ),
-      ),
-    )
-  },
-
-  loadMore: () => {
-    const listing = registry.get(listingAtom)
-    if (!listing?.nextCursor || registry.get(loadingMoreAtom) || registry.get(viewAtom) !== "files")
-      return Promise.resolve()
-    const parentId = listing.directory?.id ?? null
-    const cursor = listing.nextCursor
-    registry.set(loadingMoreAtom, true)
-    return run(
-      attempt(() => runRpc((client) => client["catalog.list"]({ parentId, cursor }))).pipe(
-        Effect.tap((page) =>
-          Effect.sync(() => {
-            const currentListing = registry.get(listingAtom)
-            if (currentListing?.nextCursor !== cursor) return
-            setListing({
-              ...currentListing,
-              entries: [...currentListing.entries, ...page.entries],
-              nextCursor: page.nextCursor,
-            } as DirectoryListing)
-          }),
-        ),
-        Effect.ensuring(Effect.sync(() => registry.set(loadingMoreAtom, false))),
-      ),
-    )
-  },
-
-  setSearchQuery: (query: string) => {
-    registry.set(queryAtom, query)
-    registry.set(searchResultsAtom, [])
-    registry.set(searchTruncatedAtom, false)
-    registry.set(searchLoadingAtom, Boolean(query.trim()))
-  },
-
-  search: (query: string) => {
-    const request = ++searchRequest
-    registry.set(queryAtom, query)
-    if (!query.trim()) {
-      registry.set(searchResultsAtom, [])
-      registry.set(searchTruncatedAtom, false)
-      registry.set(searchLoadingAtom, false)
-      return Promise.resolve()
+// Only the folder on screen refreshes on focus or polls; cached folders stay idle until revisited.
+export const folderViewAtom = Atom.family((parentId: string | null) => {
+  const pages = folderAtom(parentId)
+  let previewPolls = 0
+  return Atom.readable((get) => {
+    get.subscribe(Atom.windowFocusSignal, () => get.refresh(pages))
+    const result = get(pages)
+    // The worker fills in thumbnails after finalization; refresh with backoff until they land.
+    if (AsyncResult.isSuccess(result) && !result.waiting && !document.hidden) {
+      if (result.value.items.some((page) => page.entries.some(needsPreview))) {
+        previewPolls += 1
+        const delay =
+          previewPolls <= 5 ? 3000 : Math.min(30_000, 3000 * 2 ** Math.min(previewPolls - 5, 4))
+        const timer = setTimeout(() => get.refresh(pages), delay)
+        get.addFinalizer(() => clearTimeout(timer))
+      } else {
+        previewPolls = 0
+      }
     }
-    registry.set(searchLoadingAtom, true)
-    return run(
-      attempt(() => runRpc((client) => client["catalog.search"]({ query, limit: 100 }))).pipe(
-        Effect.tap((response) =>
-          Effect.sync(() => {
-            if (searchRequest !== request || registry.get(queryAtom) !== query) return
-            registry.set(searchResultsAtom, response.results)
-            registry.set(searchTruncatedAtom, response.truncated)
-          }),
-        ),
-        Effect.ensuring(
-          Effect.sync(() => {
-            if (searchRequest === request) registry.set(searchLoadingAtom, false)
-          }),
-        ),
-      ),
-    )
-  },
+    return viewOf(result, ({ items }) => ({
+      directory: items[0].directory,
+      breadcrumbs: items[0].breadcrumbs,
+      entries: items.flatMap((page) => page.entries),
+      hasMore: Arr.lastNonEmpty(items).nextCursor !== null,
+    }))
+  })
+})
 
-  retryPreview: (entry: Entry) => {
-    if (entry.previewStatus !== "failed") return Promise.resolve()
-    registry.set(activeEntryAtom, { ...entry, previewStatus: "pending" } as Entry)
-    return run(
-      attempt(() => runRpc((client) => client["catalog.retryPreview"]({ id: entry.id }))).pipe(
-        Effect.flatMap(() =>
-          loadDirectory(currentFolderId(), {
-            keepQuery: true,
-            limit: registry.get(listingAtom)?.entries.length,
-          }),
-        ),
-        Effect.andThen(
-          registry.get(queryAtom).trim()
-            ? Effect.promise(() => actions.search(registry.get(queryAtom)))
-            : Effect.void,
-        ),
-      ),
-    )
-  },
+export const recycleViewAtom = Atom.family((parentId: string | null) =>
+  Atom.readable((get) =>
+    parentId === null
+      ? viewOf(get(recycleBinAtom), (entries) => ({
+          directory: null,
+          breadcrumbs: [{ id: null, name: "Recycle Bin" }],
+          entries,
+          hasMore: false,
+        }))
+      : viewOf(get(trashedFolderAtom(parentId)), (listing) => ({
+          directory: listing.directory,
+          breadcrumbs: listing.breadcrumbs,
+          entries: listing.entries,
+          hasMore: false,
+        })),
+  ),
+)
 
-  refreshPendingPreviews: () => {
-    const listing = registry.get(listingAtom)
-    if (!listing?.entries.some(needsPreview) || registry.get(viewAtom) !== "files") return
-    void run(
-      loadDirectory(currentFolderId(), {
-        keepQuery: true,
-        limit: listing.entries.length,
-      }),
-    )
-  },
+/** Route loader: resolves once the destination can render, so scroll restoration has content. */
+export const visit = (folder: string | null, recycle: boolean) =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      registry.set(searchQueryAtom, "")
+      const session = yield* AtomRegistry.getResult(registry, sessionAtom, {
+        suspendOnWaiting: true,
+      }).pipe(Effect.option)
+      if (Option.isNone(session)) return
+      if (!recycle) return yield* revalidate(folderAtom(folder))
+      if (folder === null) return yield* revalidate(recycleBinAtom)
+      return yield* revalidate(trashedFolderAtom(folder))
+    }),
+  )
 
-  createFolder: (name: string) => {
-    const parentId = currentFolderId()
-    return run(
-      withBusy(
-        attempt(() => runRpc((client) => client["catalog.createFolder"]({ parentId, name }))).pipe(
-          Effect.tap(() =>
-            Effect.sync(() => {
-              registry.set(newFolderOpenAtom, false)
-              registry.set(newFolderNameAtom, "")
-            }),
-          ),
-          Effect.flatMap(() => loadDirectory(parentId)),
-        ),
-      ),
-    )
-  },
+// A cached atom answers immediately with its previous value while the refresh runs behind it.
+const revalidate = <A, E>(atom: Atom.Atom<AsyncResult.AsyncResult<A, E>>) =>
+  Effect.suspend(() => {
+    if (!AsyncResult.isInitial(registry.get(atom))) registry.refresh(atom)
+    return AtomRegistry.getResult(registry, atom).pipe(Effect.ignore)
+  })
 
-  trash: (id: string) =>
-    run(
-      withBusy(
-        attempt(() => runRpc((client) => client["catalog.trash"]({ id }))).pipe(
-          Effect.tap(() =>
-            Effect.sync(() => {
-              registry.set(pendingDeleteAtom, null)
-              registry.set(activeEntryAtom, null)
-            }),
-          ),
-          Effect.flatMap(() => reloadCurrentView()),
-        ),
-      ),
+const catalogFn = <Arg, A, E>(
+  run: (arg: Arg, client: CloudSync["Service"]) => Effect.Effect<A, E>,
+) =>
+  CloudSync.runtime.fn((arg: Arg) => CloudSync.use((client) => run(arg, client)), {
+    reactivityKeys: catalogKeys,
+  })
+
+export const createFolderAtom = catalogFn(
+  (input: { parentId: string | null; name: string }, client) =>
+    client("catalog.createFolder", input),
+)
+export const renameAtom = catalogFn((input: { id: string; name: string }, client) =>
+  client("catalog.rename", input),
+)
+export const moveAtom = catalogFn((input: { id: string; parentId: string | null }, client) =>
+  client("catalog.move", input),
+)
+export const trashAtom = catalogFn((id: string, client) => client("catalog.trash", { id }))
+export const restoreAtom = catalogFn((id: string, client) => client("catalog.restore", { id }))
+export const deletePermanentlyAtom = catalogFn((id: string, client) =>
+  client("catalog.deletePermanently", { id }),
+)
+export const retryPreviewAtom = catalogFn((id: string, client) =>
+  client("catalog.retryPreview", { id }),
+)
+
+export const downloadAtom = CloudSync.runtime.fn(
+  (id: string) =>
+    CloudSync.use((client) => client("download.file", { id })).pipe(
+      Effect.tap((ticket) => Effect.sync(() => startDownload(ticket.url))),
     ),
+  { concurrent: true },
+)
 
-  restore: (id: string) =>
-    run(
-      withBusy(
-        attempt(() => runRpc((client) => client["catalog.restore"]({ id }))).pipe(
-          Effect.flatMap(() => reloadRecycleBin()),
-        ),
-      ),
-    ),
+export const downloadFolder = (id: string) =>
+  startDownload(`/download/folder/${encodeURIComponent(id)}`)
 
-  deletePermanently: (id: string) =>
-    run(
-      withBusy(
-        attempt(() => runRpc((client) => client["catalog.deletePermanently"]({ id }))).pipe(
-          Effect.tap(() => Effect.sync(() => registry.set(pendingDeleteAtom, null))),
-          Effect.flatMap(() => reloadRecycleBin()),
-        ),
-      ),
-    ),
+export type UploadSource = ReadonlyArray<DroppedFile> | DataTransferItemList
 
-  rename: (entry: Entry, name: string) =>
-    run(
-      withBusy(
-        attempt(() => runRpc((client) => client["catalog.rename"]({ id: entry.id, name }))).pipe(
-          Effect.tap(() =>
-            Effect.sync(() => {
-              registry.set(renameEntryAtom, null)
-              registry.set(renameValueAtom, "")
-            }),
-          ),
-          Effect.flatMap(() => reloadCurrentView()),
-        ),
-      ),
-    ),
-
-  beginRename: (entry: Entry) => {
-    registry.set(renameEntryAtom, entry)
-    registry.set(renameValueAtom, entry.name)
-  },
-
-  beginMove: (entry: Entry) => {
-    registry.set(moveSourceAtom, entry)
-    return run(loadMoveDirectory(entry.parentId))
-  },
-
-  browseMove: (parentId: string | null) => run(loadMoveDirectory(parentId)),
-
-  confirmMove: () => {
-    const source = registry.get(moveSourceAtom)
-    if (!source) return Promise.resolve()
-    const parentId = registry.get(moveListingAtom)?.directory?.id ?? null
-    return run(
-      withBusy(
-        attempt(() => runRpc((client) => client["catalog.move"]({ id: source.id, parentId }))).pipe(
-          Effect.tap(() =>
-            Effect.sync(() => {
-              registry.set(moveSourceAtom, null)
-              registry.set(moveListingAtom, null)
-            }),
-          ),
-          Effect.flatMap(() => reloadCurrentView()),
-        ),
-      ),
-    )
-  },
-
-  download: (id: string) =>
-    run(
-      attempt(() => runRpc((client) => client["download.file"]({ id }))).pipe(
-        Effect.tap((ticket) => Effect.sync(() => startDownload(ticket.url))),
-      ),
-    ),
-
-  downloadFolder: (id: string) => startDownload(`/download/folder/${encodeURIComponent(id)}`),
-
-  upload: (files: ReadonlyArray<{ file: File; relativePath: string }>) => {
+export const uploadAtom = CloudSync.runtime.fn(
+  Effect.fnUntraced(function* ({
+    parentId,
+    source,
+  }: {
+    readonly parentId: string | null
+    readonly source: UploadSource
+  }) {
+    const files =
+      source instanceof DataTransferItemList ? yield* collectDroppedFiles(source) : source
     const accepted = files.filter(({ file }) => file.name !== ".DS_Store")
-    if (accepted.length === 0) return Promise.resolve()
-    const parentId = currentFolderId()
+    if (accepted.length === 0) return
     let done = 0
     let failed = 0
     const failures: Array<string> = []
-    const publish = () => registry.set(uploadProgressAtom, { done, failed, total: accepted.length })
-    publish()
-    registry.set(errorAtom, null)
-    return run(
-      Effect.forEach(
-        accepted,
-        ({ file, relativePath }) =>
-          uploadBrowserFile(file, parentId, relativePath).pipe(
-            Effect.matchEffect({
-              onFailure: (error) =>
-                Effect.sync(() => {
-                  failed += 1
-                  failures.push(`${relativePath}: ${message(error)}`)
-                  publish()
-                }),
-              onSuccess: () =>
-                Effect.sync(() => {
-                  done += 1
-                  publish()
-                }),
-            }),
-          ),
-        { concurrency: 4, discard: true },
-      ).pipe(
-        Effect.ensuring(
-          Effect.sync(() => {
-            registry.set(uploadProgressAtom, null)
-            if (failures.length > 0) {
-              registry.set(
-                errorAtom,
-                `${failures.length} of ${accepted.length} uploads failed. ${failures.slice(0, 3).join(" · ")}`,
-              )
-            }
+    const publish = Effect.suspend(() =>
+      Atom.set(uploadProgressAtom, { done, failed, total: accepted.length }),
+    )
+    yield* publish
+    yield* Effect.forEach(
+      accepted,
+      ({ file, relativePath }) =>
+        uploadBrowserFile(file, parentId, relativePath).pipe(
+          Effect.matchEffect({
+            onFailure: (error) => {
+              failed += 1
+              failures.push(`${relativePath}: ${error.message}`)
+              return publish
+            },
+            onSuccess: () => {
+              done += 1
+              return publish
+            },
           }),
         ),
-        Effect.flatMap(() =>
-          currentFolderId() === parentId && registry.get(viewAtom) === "files"
-            ? loadDirectory(parentId)
-            : Effect.void,
-        ),
-      ),
-    )
-  },
+      { concurrency: 4, discard: true },
+    ).pipe(Effect.ensuring(Atom.set(uploadProgressAtom, null)))
+    if (failures.length > 0) {
+      yield* Atom.set(
+        errorAtom,
+        `${failures.length} of ${accepted.length} uploads failed. ${failures.slice(0, 3).join(" · ")}`,
+      )
+    }
+  }),
+  { reactivityKeys: catalogKeys, concurrent: true },
+)
 
-  uploadDrop: (items: DataTransferItemList) =>
-    run(
-      collectDroppedFiles(items).pipe(
-        Effect.flatMap((files) =>
-          files.length > 0 ? Effect.promise(() => actions.upload(files)) : Effect.void,
-        ),
-      ),
-    ),
+/** Runs a mutation from an event handler; a failure is shown in the error banner. */
+export function mutate<Arg, A, E>(
+  atom: Atom.AtomResultFn<Arg, A, E>,
+  arg: Arg,
+): Promise<Exit.Exit<A, E>> {
+  registry.set(errorAtom, null)
+  const release = registry.mount(atom)
+  registry.set(atom, arg)
+  return Effect.runPromiseExit(
+    AtomRegistry.getResult(registry, atom, { suspendOnWaiting: true }),
+  ).then((exit) => {
+    release()
+    if (Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)) {
+      registry.set(errorAtom, describe(exit.cause))
+    }
+    return exit
+  })
 }
 
-const visit = Effect.fn("visit")(function* (folder: string | null, recycle: boolean) {
-  const id = ++latestVisit
-  const isLatest = () => id === latestVisit
-  yield* Effect.promise(() => actions.boot())
-  if (!isLatest() || registry.get(authViewAtom) !== "authenticated") return
-  if (recycle) {
-    return yield* Effect.promise(() =>
-      folder === null ? actions.showRecycleBin() : actions.openRecycleFolder(folder),
-    )
-  }
-  const show = (listing: DirectoryListing) => {
-    if (!isLatest()) return
-    registry.set(viewAtom, "files")
-    setListing(listing)
-    schedulePreviewPoll(listing, true)
-  }
-  const cached = listingCache.get(folder)
-  // Re-fetch as many entries as were showing so the restored scroll position stays valid.
-  const load = fetchListing(folder, cached?.entries.length).pipe(
-    Effect.tap((listing) => Effect.sync(() => show(listing))),
-  )
-  clearSearch()
-  if (!cached) return yield* withBusy(load)
-  show(cached)
-  yield* load.pipe(Effect.ignore, Effect.forkDetach)
-})
+function describe(cause: Cause.Cause<unknown>): string {
+  const error = Cause.squash(cause)
+  return Predicate.hasProperty(error, "message") &&
+    Predicate.isString(error.message) &&
+    error.message
+    ? error.message
+    : "The operation could not be completed"
+}
 
 function startDownload(url: string) {
   const anchor = document.createElement("a")
@@ -534,72 +343,4 @@ function startDownload(url: string) {
   document.body.append(anchor)
   anchor.click()
   anchor.remove()
-}
-
-function withBusy<A, E>(effect: Effect.Effect<A, E>): Effect.Effect<A, E> {
-  return Effect.sync(() => {
-    registry.set(busyAtom, true)
-    registry.set(errorAtom, null)
-  }).pipe(Effect.andThen(effect), Effect.ensuring(Effect.sync(() => registry.set(busyAtom, false))))
-}
-
-function loadDirectory(
-  parentId: string | null,
-  options: {
-    readonly resetPoll?: boolean
-    readonly keepQuery?: boolean
-    readonly limit?: number
-  } = {},
-) {
-  return fetchListing(parentId, options.limit).pipe(
-    Effect.tap((listing) =>
-      Effect.sync(() => {
-        registry.set(viewAtom, "files")
-        setListing(listing)
-        if (!options.keepQuery) clearSearch()
-        schedulePreviewPoll(listing, options.resetPoll ?? true)
-      }),
-    ),
-  )
-}
-
-function fetchListing(parentId: string | null, loaded?: number) {
-  const limit = loaded && loaded > 0 ? Math.min(loaded, 600) : undefined
-  return attempt(() => runRpc((client) => client["catalog.list"]({ parentId, limit })))
-}
-
-function clearSearch() {
-  registry.set(queryAtom, "")
-  registry.set(searchResultsAtom, [])
-  registry.set(searchLoadingAtom, false)
-  registry.set(searchTruncatedAtom, false)
-}
-
-function reloadRecycleBin() {
-  return attempt(() => runRpc((client) => client["catalog.recycleBin"]({}))).pipe(
-    Effect.tap((entries) =>
-      Effect.sync(() => {
-        registry.set(recycleListingAtom, null)
-        registry.set(recycleEntriesAtom, entries)
-      }),
-    ),
-  )
-}
-
-function reloadCurrentView() {
-  if (registry.get(viewAtom) === "recycle") return reloadRecycleBin()
-  const query = registry.get(queryAtom)
-  const limit = registry.get(listingAtom)?.entries.length
-  if (query.trim()) {
-    return loadDirectory(currentFolderId(), { keepQuery: true, limit }).pipe(
-      Effect.andThen(Effect.promise(() => actions.search(query))),
-    )
-  }
-  return loadDirectory(currentFolderId(), { limit })
-}
-
-function loadMoveDirectory(parentId: string | null) {
-  return attempt(() => runRpc((client) => client["catalog.list"]({ parentId }))).pipe(
-    Effect.tap((listing) => Effect.sync(() => registry.set(moveListingAtom, listing))),
-  )
 }

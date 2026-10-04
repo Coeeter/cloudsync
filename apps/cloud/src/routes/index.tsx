@@ -29,6 +29,8 @@ import { Input } from "@cloudsync/ui/components/input"
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@cloudsync/ui/components/input-otp"
 import { Progress } from "@cloudsync/ui/components/progress"
 import { createFileRoute, Link, useRouter } from "@tanstack/react-router"
+import { Exit } from "effect"
+import { AsyncResult } from "effect/unstable/reactivity"
 import {
   ChevronLeft,
   ChevronRight,
@@ -62,32 +64,42 @@ import {
   useState,
 } from "react"
 import {
-  actions,
-  activeEntryAtom,
-  authViewAtom,
-  busyAtom,
+  activeEntryIdAtom,
+  createFolderAtom,
+  debouncedSearchQueryAtom,
+  deletePermanentlyAtom,
+  downloadAtom,
+  downloadFolder,
   dragActiveAtom,
-  emailAtom,
   errorAtom,
-  listingAtom,
-  loadingMoreAtom,
-  moveListingAtom,
+  folderAtom,
+  folderViewAtom,
+  moveAtom,
+  moveFolderAtom,
+  moveFolderIdAtom,
   moveSourceAtom,
+  mutate,
   newFolderNameAtom,
   newFolderOpenAtom,
-  noticeAtom,
   pendingDeleteAtom,
-  queryAtom,
-  recycleEntriesAtom,
-  recycleListingAtom,
+  recycleViewAtom,
   registry,
+  renameAtom,
   renameEntryAtom,
   renameValueAtom,
-  searchLoadingAtom,
-  searchResultsAtom,
-  searchTruncatedAtom,
+  requestPinAtom,
+  restoreAtom,
+  retryPreviewAtom,
+  searchAtom,
+  searchQueryAtom,
+  sessionAtom,
+  signOut,
+  trashAtom,
+  type UploadSource,
+  uploadAtom,
   uploadProgressAtom,
-  viewAtom,
+  verifyPinAtom,
+  visit,
 } from "../client/state"
 import { useAtomValue } from "../client/use-atom"
 
@@ -99,45 +111,57 @@ export const Route = createFileRoute("/")({
   // The catalog is only reachable with the browser's session cookie.
   ssr: false,
   loaderDeps: ({ search }) => search,
-  loader: ({ deps }) => actions.visit(deps.folder ?? null, deps.recycle === true),
-  pendingComponent: () => <AuthScreen view="checking" />,
+  loader: ({ deps }) => visit(deps.folder ?? null, deps.recycle === true),
+  pendingComponent: CheckingScreen,
   component: CloudSyncApp,
 })
 
 function CloudSyncApp() {
-  const authView = useAtomValue(authViewAtom)
-  if (authView !== "authenticated") return <AuthScreen view={authView} />
-  return <FileBrowser />
+  const session = useAtomValue(sessionAtom)
+  if (AsyncResult.isSuccess(session)) return <FileBrowser />
+  if (AsyncResult.isInitial(session)) return <CheckingScreen />
+  return <SignIn />
 }
 
-function AuthScreen({ view }: { view: "checking" | "email" | "pin" }) {
+function CheckingScreen() {
+  return (
+    <main className="grid min-h-screen place-items-center p-6">
+      <p className="mb-3.5 text-muted-foreground leading-normal">Opening your archive…</p>
+    </main>
+  )
+}
+
+function SignIn() {
   const router = useRouter()
-  const busy = useAtomValue(busyAtom)
+  const requestPin = useAtomValue(requestPinAtom)
+  const verifyPin = useAtomValue(verifyPinAtom)
+  const busy = requestPin.waiting || verifyPin.waiting
   const error = useAtomValue(errorAtom)
-  const notice = useAtomValue(noticeAtom)
-  const savedEmail = useAtomValue(emailAtom)
+  const [view, setView] = useState<"email" | "pin">("email")
+  const [savedEmail, setSavedEmail] = useState("")
+  const [notice, setNotice] = useState<string | null>(null)
   const [code, setCode] = useState("")
 
-  useEffect(() => {
-    if (view === "pin") setCode("")
-  }, [view])
-
-  if (view === "checking") {
-    return (
-      <main className="grid min-h-screen place-items-center p-6">
-        <p className="mb-3.5 text-muted-foreground leading-normal">Opening your archive…</p>
-      </main>
-    )
-  }
+  const sendPin = (email: string, sentNotice: string | null) =>
+    mutate(requestPinAtom, email).then((exit) => {
+      if (Exit.isFailure(exit)) return
+      setSavedEmail(email)
+      setNotice(sentNotice)
+      setCode("")
+      setView("pin")
+    })
 
   const submitEmail = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const email = String(new FormData(event.currentTarget).get("email") ?? "").trim()
-    if (email) void actions.requestPin(email)
+    if (email) void sendPin(email, null)
   }
 
   const submitCode = (value: string) => {
-    if (value.length === 6 && !busy) void actions.verifyPin(value).then(() => router.invalidate())
+    if (value.length !== 6 || busy) return
+    void mutate(verifyPinAtom, { email: savedEmail, code: value }).then((exit) => {
+      if (Exit.isSuccess(exit)) void router.invalidate()
+    })
   }
 
   return (
@@ -205,7 +229,11 @@ function AuthScreen({ view }: { view: "checking" | "email" | "pin" }) {
               <button
                 className="border-0 bg-transparent px-0 py-1 text-sm text-muted-foreground hover:not-disabled:text-foreground"
                 type="button"
-                onClick={actions.changeEmail}
+                onClick={() => {
+                  registry.set(errorAtom, null)
+                  setNotice(null)
+                  setView("email")
+                }}
                 disabled={busy}
               >
                 Use a different email
@@ -213,7 +241,7 @@ function AuthScreen({ view }: { view: "checking" | "email" | "pin" }) {
               <button
                 className="border-0 bg-transparent px-0 py-1 text-sm text-muted-foreground hover:not-disabled:text-foreground"
                 type="button"
-                onClick={() => void actions.resendPin()}
+                onClick={() => void sendPin(savedEmail, "A new code was sent.")}
                 disabled={busy}
               >
                 Resend code
@@ -227,37 +255,31 @@ function AuthScreen({ view }: { view: "checking" | "email" | "pin" }) {
 }
 
 function FileBrowser() {
-  const listing = useAtomValue(listingAtom)
-  const query = useAtomValue(queryAtom)
-  const searchResults = useAtomValue(searchResultsAtom)
-  const searchLoading = useAtomValue(searchLoadingAtom)
-  const searchTruncated = useAtomValue(searchTruncatedAtom)
-  const recycleEntries = useAtomValue(recycleEntriesAtom)
+  const location = Route.useSearch()
+  const folder = location.folder ?? null
+  const view = location.recycle ? "recycle" : "files"
+  const current = useAtomValue(
+    view === "recycle" ? recycleViewAtom(folder) : folderViewAtom(folder),
+  )
+  const query = useAtomValue(searchQueryAtom)
+  const debouncedQuery = useAtomValue(debouncedSearchQueryAtom)
+  const search = useAtomValue(searchAtom)
   const error = useAtomValue(errorAtom)
   const progress = useAtomValue(uploadProgressAtom)
   const dragActive = useAtomValue(dragActiveAtom)
-  const view = useAtomValue(viewAtom)
-  const activeEntry = useAtomValue(activeEntryAtom)
+  const activeEntryId = useAtomValue(activeEntryIdAtom)
   const moveSource = useAtomValue(moveSourceAtom)
   const newFolderOpen = useAtomValue(newFolderOpenAtom)
   const newFolderName = useAtomValue(newFolderNameAtom)
   const renameEntry = useAtomValue(renameEntryAtom)
   const renameValue = useAtomValue(renameValueAtom)
   const pendingDelete = useAtomValue(pendingDeleteAtom)
-  const recycleListing = useAtomValue(recycleListingAtom)
-  const loadingMore = useAtomValue(loadingMoreAtom)
   const sentinel = useRef<HTMLDivElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const folderInput = useRef<HTMLInputElement>(null)
-  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const dragDepth = useRef(0)
 
-  const onSearch = (event: ChangeEvent<HTMLInputElement>) => {
-    const value = event.target.value
-    actions.setSearchQuery(value)
-    if (searchTimer.current) clearTimeout(searchTimer.current)
-    searchTimer.current = setTimeout(() => void actions.search(value), 180)
-  }
+  const upload = (source: UploadSource) => void mutate(uploadAtom, { parentId: folder, source })
 
   const uploadInput = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []).map((file) => ({
@@ -265,7 +287,7 @@ function FileBrowser() {
       relativePath: file.webkitRelativePath || file.name,
     }))
     event.target.value = ""
-    if (files.length > 0) void actions.upload(files)
+    if (files.length > 0) upload(files)
   }
 
   const carriesFiles = (event: DragEvent) => event.dataTransfer.types.includes("Files")
@@ -288,49 +310,39 @@ function FileBrowser() {
     event.preventDefault()
     dragDepth.current = 0
     registry.set(dragActiveAtom, false)
-    if (canDrop) void actions.uploadDrop(event.dataTransfer.items)
+    if (canDrop) upload(event.dataTransfer.items)
   }
 
   const searching = view === "files" && query.trim().length > 0
-  const entries =
-    view === "recycle"
-      ? (recycleListing?.entries ?? recycleEntries)
-      : searching
-        ? searchResults.map((result) => result.entry)
-        : (listing?.entries ?? [])
+  const searchResponse = AsyncResult.getOrElse(search, () => null)
+  const searchResults = searchResponse?.results ?? []
+  const searchTruncated = searchResponse?.truncated ?? false
+  const searchLoading = searching && (search.waiting || debouncedQuery !== query)
+  const entries = searching ? searchResults.map((result) => result.entry) : current.entries
   const searchPathById = new Map(
     searchResults.map((result) => [result.entry.id, result.parentPath]),
   )
-  const recycleMode = view === "recycle" ? (recycleListing ? "nested" : "root") : null
-  const hasMore = view === "files" && !searching && Boolean(listing?.nextCursor)
+  const recycleMode = view === "recycle" ? (folder === null ? "root" : "nested") : null
+  const hasMore = view === "files" && !searching && current.hasMore
+  const loadingMore = hasMore && current.waiting
+  const activeEntry = entries.find((entry) => entry.id === activeEntryId) ?? null
 
   // Re-observing after every page makes the observer fire again while the sentinel is still
   // on screen, so tall viewports keep filling instead of stalling after one page.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: nextCursor intentionally re-arms the observer
+  // biome-ignore lint/correctness/useExhaustiveDependencies: entries.length intentionally re-arms the observer
   useEffect(() => {
     const node = sentinel.current
-    if (!node || !hasMore) return
+    if (!node || !hasMore || current.waiting) return
     const observer = new IntersectionObserver(
       (records) => {
-        if (records.some((record) => record.isIntersecting)) void actions.loadMore()
+        if (records.some((record) => record.isIntersecting))
+          registry.set(folderAtom(folder), undefined)
       },
       { rootMargin: "1200px 0px" },
     )
     observer.observe(node)
     return () => observer.disconnect()
-  }, [hasMore, listing?.nextCursor])
-
-  useEffect(() => {
-    const refresh = () => {
-      if (!document.hidden) actions.refreshPendingPreviews()
-    }
-    window.addEventListener("focus", refresh)
-    document.addEventListener("visibilitychange", refresh)
-    return () => {
-      window.removeEventListener("focus", refresh)
-      document.removeEventListener("visibilitychange", refresh)
-    }
-  }, [])
+  }, [hasMore, current.waiting, folder, current.entries.length])
 
   return (
     <main
@@ -350,26 +362,24 @@ function FileBrowser() {
           {view === "recycle" ? (
             <>
               <FolderLink folder={null}>CloudSync</FolderLink>
-              {(recycleListing?.breadcrumbs ?? [{ id: null, name: "Recycle Bin" }]).map(
-                (crumb, index, crumbs) => (
-                  <span
-                    key={crumb.id ?? "recycle"}
-                    className="inline-flex min-w-0 items-center gap-2"
+              {current.breadcrumbs.map((crumb, index, crumbs) => (
+                <span
+                  key={crumb.id ?? "recycle"}
+                  className="inline-flex min-w-0 items-center gap-2"
+                >
+                  <span aria-hidden="true">/</span>
+                  <FolderLink
+                    folder={crumb.id}
+                    recycle
+                    aria-current={index === crumbs.length - 1 ? "page" : undefined}
                   >
-                    <span aria-hidden="true">/</span>
-                    <FolderLink
-                      folder={crumb.id}
-                      recycle
-                      aria-current={index === crumbs.length - 1 ? "page" : undefined}
-                    >
-                      {crumb.name}
-                    </FolderLink>
-                  </span>
-                ),
-              )}
+                    {crumb.name}
+                  </FolderLink>
+                </span>
+              ))}
             </>
           ) : (
-            (listing?.breadcrumbs ?? []).map((crumb, index, crumbs) => (
+            current.breadcrumbs.map((crumb, index, crumbs) => (
               <span key={crumb.id ?? "root"} className="inline-flex min-w-0 items-center gap-2">
                 {index > 0 ? <span aria-hidden="true">/</span> : null}
                 <FolderLink
@@ -394,9 +404,9 @@ function FileBrowser() {
                 <Input
                   className="h-10 w-40 rounded-lg border-transparent bg-card pr-10 pl-10 text-foreground focus-visible:border-ring sm:w-56 lg:w-80 max-sm:w-full"
                   value={query}
-                  onChange={onSearch}
+                  onChange={(event) => registry.set(searchQueryAtom, event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === "Escape") void actions.search("")
+                    if (event.key === "Escape") registry.set(searchQueryAtom, "")
                   }}
                   placeholder="Search names and paths"
                   aria-label="Search archive"
@@ -406,7 +416,7 @@ function FileBrowser() {
                     type="button"
                     className="absolute top-1/2 right-2 grid size-6 -translate-y-1/2 place-items-center rounded-md border-0 bg-transparent p-0 text-muted-foreground hover:bg-accent hover:text-foreground"
                     aria-label="Clear search"
-                    onClick={() => void actions.search("")}
+                    onClick={() => registry.set(searchQueryAtom, "")}
                   >
                     <X size={14} />
                   </button>
@@ -457,7 +467,7 @@ function FileBrowser() {
                 </DropdownMenuItem>
               )}
               <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={() => void actions.logout()}>
+              <DropdownMenuItem onSelect={() => void signOut()}>
                 <LogOut /> Sign out
               </DropdownMenuItem>
             </DropdownMenuContent>
@@ -474,17 +484,17 @@ function FileBrowser() {
         </div>
       </header>
 
-      {error ? (
+      {(error ?? current.error) ? (
         <div
           className="mb-4 flex items-start justify-between gap-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-sm leading-normal text-destructive"
           role="alert"
         >
-          <span>{error}</span>
+          <span>{error ?? current.error}</span>
           <button
             className="shrink-0 border-0 bg-transparent p-0.5 text-inherit"
             type="button"
             aria-label="Dismiss"
-            onClick={actions.dismissError}
+            onClick={() => registry.set(errorAtom, null)}
           >
             <X size={14} />
           </button>
@@ -548,7 +558,7 @@ function FileBrowser() {
                     ? searchLoading
                       ? "Searching…"
                       : "No matching files"
-                    : listing
+                    : current.loaded
                       ? "Drop files here or upload a folder"
                       : "Loading…"}
             </p>
@@ -568,10 +578,10 @@ function FileBrowser() {
 
       {dragActive ? (
         <div className="pointer-events-none fixed inset-4 z-50 grid place-items-center rounded-xl border-2 border-ring bg-[rgba(11,12,14,0.9)] text-xl text-foreground">
-          Add to {listing?.directory?.name ?? "CloudSync"}
+          Add to {current.directory?.name ?? "CloudSync"}
         </div>
       ) : null}
-      <NewFolderDialog open={newFolderOpen} name={newFolderName} />
+      <NewFolderDialog open={newFolderOpen} name={newFolderName} parentId={folder} />
       <RenameDialog entry={renameEntry} value={renameValue} />
       <DeleteDialog pending={pendingDelete} />
       <Lightbox entry={activeEntry} entries={entries} />
@@ -708,7 +718,7 @@ function EntryCard({
         <button
           type="button"
           className={cardClass}
-          onClick={() => registry.set(activeEntryAtom, entry)}
+          onClick={() => registry.set(activeEntryIdAtom, entry.id)}
           title={entry.name}
         >
           {card}
@@ -729,7 +739,7 @@ function EntryCard({
           <DropdownMenuContent align="end">
             {recycle ? (
               <>
-                <DropdownMenuItem onSelect={() => void actions.restore(entry.id)}>
+                <DropdownMenuItem onSelect={() => void mutate(restoreAtom, entry.id)}>
                   <RotateCcw /> Restore
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
@@ -744,24 +754,34 @@ function EntryCard({
               <>
                 {entry.kind === "file" ? (
                   <>
-                    <DropdownMenuItem onSelect={() => void actions.download(entry.id)}>
+                    <DropdownMenuItem onSelect={() => void mutate(downloadAtom, entry.id)}>
                       <Download /> Download
                     </DropdownMenuItem>
                     {entry.previewStatus === "failed" ? (
-                      <DropdownMenuItem onSelect={() => void actions.retryPreview(entry)}>
+                      <DropdownMenuItem onSelect={() => void mutate(retryPreviewAtom, entry.id)}>
                         <RotateCcw /> Retry preview
                       </DropdownMenuItem>
                     ) : null}
                   </>
                 ) : (
-                  <DropdownMenuItem onSelect={() => actions.downloadFolder(entry.id)}>
+                  <DropdownMenuItem onSelect={() => downloadFolder(entry.id)}>
                     <Download /> Download ZIP
                   </DropdownMenuItem>
                 )}
-                <DropdownMenuItem onSelect={() => actions.beginRename(entry)}>
+                <DropdownMenuItem
+                  onSelect={() => {
+                    registry.set(renameEntryAtom, entry)
+                    registry.set(renameValueAtom, entry.name)
+                  }}
+                >
                   <Pencil /> Rename
                 </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => void actions.beginMove(entry)}>
+                <DropdownMenuItem
+                  onSelect={() => {
+                    registry.set(moveFolderIdAtom, entry.parentId)
+                    registry.set(moveSourceAtom, entry)
+                  }}
+                >
                   <Move /> Move
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
@@ -780,8 +800,16 @@ function EntryCard({
   )
 }
 
-function NewFolderDialog({ open, name }: { open: boolean; name: string }) {
-  const busy = useAtomValue(busyAtom)
+function NewFolderDialog({
+  open,
+  name,
+  parentId,
+}: {
+  open: boolean
+  name: string
+  parentId: string | null
+}) {
+  const busy = useAtomValue(createFolderAtom).waiting
   return (
     <Dialog
       open={open}
@@ -795,7 +823,12 @@ function NewFolderDialog({ open, name }: { open: boolean; name: string }) {
           className="grid gap-5"
           onSubmit={(event) => {
             event.preventDefault()
-            if (name.trim()) void actions.createFolder(name.trim())
+            if (!name.trim()) return
+            void mutate(createFolderAtom, { parentId, name: name.trim() }).then((exit) => {
+              if (Exit.isFailure(exit)) return
+              registry.set(newFolderOpenAtom, false)
+              registry.set(newFolderNameAtom, "")
+            })
           }}
         >
           <DialogHeader>
@@ -827,7 +860,7 @@ function NewFolderDialog({ open, name }: { open: boolean; name: string }) {
 }
 
 function RenameDialog({ entry, value }: { entry: Entry | null; value: string }) {
-  const busy = useAtomValue(busyAtom)
+  const busy = useAtomValue(renameAtom).waiting
   return (
     <Dialog
       open={entry !== null}
@@ -840,9 +873,13 @@ function RenameDialog({ entry, value }: { entry: Entry | null; value: string }) 
           className="grid gap-5"
           onSubmit={(event) => {
             event.preventDefault()
-            if (entry && value.trim() && value.trim() !== entry.name)
-              void actions.rename(entry, value.trim())
-            else registry.set(renameEntryAtom, null)
+            if (!entry || !value.trim() || value.trim() === entry.name) {
+              registry.set(renameEntryAtom, null)
+              return
+            }
+            void mutate(renameAtom, { id: entry.id, name: value.trim() }).then((exit) => {
+              if (Exit.isSuccess(exit)) registry.set(renameEntryAtom, null)
+            })
           }}
         >
           <DialogHeader>
@@ -902,8 +939,12 @@ function DeleteDialog({ pending }: { pending: { entry: Entry; permanent: boolean
             variant="destructive"
             onClick={() => {
               if (!pending) return
-              if (pending.permanent) void actions.deletePermanently(pending.entry.id)
-              else void actions.trash(pending.entry.id)
+              const atom = pending.permanent ? deletePermanentlyAtom : trashAtom
+              void mutate(atom, pending.entry.id).then((exit) => {
+                if (Exit.isFailure(exit)) return
+                registry.set(pendingDeleteAtom, null)
+                registry.set(activeEntryIdAtom, null)
+              })
             }}
           >
             {pending?.permanent ? "Delete permanently" : "Move to Recycle Bin"}
@@ -921,7 +962,10 @@ function Lightbox({ entry, entries }: { entry: Entry | null; entries: ReadonlyAr
 
   const step = (offset: number) => {
     if (files.length < 2 || index < 0) return
-    registry.set(activeEntryAtom, files[(index + offset + files.length) % files.length] ?? null)
+    registry.set(
+      activeEntryIdAtom,
+      files[(index + offset + files.length) % files.length]?.id ?? null,
+    )
   }
   const stepRef = useRef(step)
   stepRef.current = step
@@ -962,7 +1006,7 @@ function Lightbox({ entry, entries }: { entry: Entry | null; entries: ReadonlyAr
     <Dialog
       open={entry !== null}
       onOpenChange={(open) => {
-        if (!open) registry.set(activeEntryAtom, null)
+        if (!open) registry.set(activeEntryIdAtom, null)
       }}
     >
       <DialogContent
@@ -982,7 +1026,7 @@ function Lightbox({ entry, entries }: { entry: Entry | null; entries: ReadonlyAr
           </div>
           {entry ? (
             entry.previewStatus === "failed" ? (
-              <Button variant="ghost" onClick={() => void actions.retryPreview(entry)}>
+              <Button variant="ghost" onClick={() => void mutate(retryPreviewAtom, entry.id)}>
                 <RotateCcw size={16} /> Retry preview
               </Button>
             ) : null
@@ -993,7 +1037,7 @@ function Lightbox({ entry, entries }: { entry: Entry | null; entries: ReadonlyAr
               variant="ghost"
               aria-label="Download"
               title="Download"
-              onClick={() => void actions.download(entry.id)}
+              onClick={() => void mutate(downloadAtom, entry.id)}
             >
               <Download size={18} />
             </Button>
@@ -1003,7 +1047,7 @@ function Lightbox({ entry, entries }: { entry: Entry | null; entries: ReadonlyAr
             variant="ghost"
             aria-label="Close"
             title="Close (Esc)"
-            onClick={() => registry.set(activeEntryAtom, null)}
+            onClick={() => registry.set(activeEntryIdAtom, null)}
           >
             <X size={20} />
           </Button>
@@ -1089,7 +1133,7 @@ function LightboxMedia({ entry }: { entry: Entry }) {
     <div className="absolute inset-0 grid place-content-center justify-items-center gap-3.5 text-muted-foreground">
       <FileIcon size={44} strokeWidth={1.2} />
       <span>No preview for this file</span>
-      <Button variant="outline" onClick={() => void actions.download(entry.id)}>
+      <Button variant="outline" onClick={() => void mutate(downloadAtom, entry.id)}>
         <Download /> Download
       </Button>
     </div>
@@ -1097,78 +1141,79 @@ function LightboxMedia({ entry }: { entry: Entry }) {
 }
 
 function MoveDialog({ source }: { source: Entry | null }) {
-  const listing = useAtomValue(moveListingAtom)
-  const busy = useAtomValue(busyAtom)
-  const folders =
-    listing?.entries.filter((entry) => entry.kind === "directory" && entry.id !== source?.id) ?? []
-  const destinationId = listing?.directory?.id ?? null
-  const unchanged = source !== null && destinationId === source.parentId
-
+  const close = () => registry.set(moveSourceAtom, null)
   return (
     <Dialog
       open={source !== null}
       onOpenChange={(open) => {
-        if (!open) {
-          registry.set(moveSourceAtom, null)
-          registry.set(moveListingAtom, null)
-        }
+        if (!open) close()
       }}
     >
       <DialogContent className="gap-3">
-        <DialogHeader>
-          <DialogTitle>Move “{source?.name}”</DialogTitle>
-          <DialogDescription>Open the destination folder, then choose Move here.</DialogDescription>
-        </DialogHeader>
-        <nav
-          className="flex gap-1.5 overflow-x-auto border-b border-border px-0.5 py-2 text-sm whitespace-nowrap text-muted-foreground [&_a]:border-0 [&_a]:bg-transparent [&_a]:p-0 [&_a]:text-inherit [&>span:last-child_button]:font-semibold [&>span:last-child_button]:text-foreground"
-          aria-label="Destination"
-        >
-          {(listing?.breadcrumbs ?? []).map((crumb, index) => (
-            <span key={crumb.id ?? "root"} className="inline-flex min-w-0 items-center gap-2">
-              {index > 0 ? <span aria-hidden="true">/</span> : null}
-              <button type="button" onClick={() => void actions.browseMove(crumb.id)}>
-                {crumb.name}
-              </button>
-            </span>
-          ))}
-        </nav>
-        <div className="grid min-h-52 max-h-[46vh] content-start overflow-y-auto [&>button]:flex [&>button]:items-center [&>button]:gap-2.5 [&>button]:rounded-md [&>button]:border-0 [&>button]:bg-transparent [&>button]:p-2.5 [&>button]:text-left [&>button]:text-foreground [&>button:hover]:bg-card [&>button_span]:flex-1 [&>button_span]:overflow-hidden [&>button_span]:text-ellipsis [&>button_span]:whitespace-nowrap">
-          {folders.length === 0 ? (
-            <p className="m-0 px-2.5 py-6 text-center text-sm text-muted-foreground">
-              No folders here
-            </p>
-          ) : null}
-          {folders.map((folder) => (
-            <button
-              key={folder.id}
-              type="button"
-              onClick={() => void actions.browseMove(folder.id)}
-            >
-              <Folder size={18} /> <span>{folder.name}</span>
-              <ChevronRight size={16} className="text-muted-foreground" />
-            </button>
-          ))}
-        </div>
-        <DialogFooter>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => {
-              registry.set(moveSourceAtom, null)
-              registry.set(moveListingAtom, null)
-            }}
-          >
-            Cancel
-          </Button>
-          <Button
-            disabled={busy || unchanged || !listing}
-            onClick={() => void actions.confirmMove()}
-          >
-            Move to {listing?.directory?.name ?? "CloudSync"}
-          </Button>
-        </DialogFooter>
+        {source ? <MovePicker source={source} close={close} /> : null}
       </DialogContent>
     </Dialog>
+  )
+}
+
+function MovePicker({ source, close }: { source: Entry; close: () => void }) {
+  const folderId = useAtomValue(moveFolderIdAtom)
+  const result = useAtomValue(moveFolderAtom(folderId))
+  const busy = useAtomValue(moveAtom).waiting
+  const listing = AsyncResult.getOrElse(result, () => null)
+  const folders =
+    listing?.entries.filter((entry) => entry.kind === "directory" && entry.id !== source.id) ?? []
+  const unchanged = folderId === source.parentId
+  const browse = (id: string | null) => registry.set(moveFolderIdAtom, id)
+
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle>Move “{source.name}”</DialogTitle>
+        <DialogDescription>Open the destination folder, then choose Move here.</DialogDescription>
+      </DialogHeader>
+      <nav
+        className="flex gap-1.5 overflow-x-auto border-b border-border px-0.5 py-2 text-sm whitespace-nowrap text-muted-foreground [&_a]:border-0 [&_a]:bg-transparent [&_a]:p-0 [&_a]:text-inherit [&>span:last-child_button]:font-semibold [&>span:last-child_button]:text-foreground"
+        aria-label="Destination"
+      >
+        {(listing?.breadcrumbs ?? []).map((crumb, index) => (
+          <span key={crumb.id ?? "root"} className="inline-flex min-w-0 items-center gap-2">
+            {index > 0 ? <span aria-hidden="true">/</span> : null}
+            <button type="button" onClick={() => browse(crumb.id)}>
+              {crumb.name}
+            </button>
+          </span>
+        ))}
+      </nav>
+      <div className="grid min-h-52 max-h-[46vh] content-start overflow-y-auto [&>button]:flex [&>button]:items-center [&>button]:gap-2.5 [&>button]:rounded-md [&>button]:border-0 [&>button]:bg-transparent [&>button]:p-2.5 [&>button]:text-left [&>button]:text-foreground [&>button:hover]:bg-card [&>button_span]:flex-1 [&>button_span]:overflow-hidden [&>button_span]:text-ellipsis [&>button_span]:whitespace-nowrap">
+        {listing && folders.length === 0 ? (
+          <p className="m-0 px-2.5 py-6 text-center text-sm text-muted-foreground">
+            No folders here
+          </p>
+        ) : null}
+        {folders.map((folder) => (
+          <button key={folder.id} type="button" onClick={() => browse(folder.id)}>
+            <Folder size={18} /> <span>{folder.name}</span>
+            <ChevronRight size={16} className="text-muted-foreground" />
+          </button>
+        ))}
+      </div>
+      <DialogFooter>
+        <Button type="button" variant="outline" onClick={close}>
+          Cancel
+        </Button>
+        <Button
+          disabled={busy || unchanged || !listing}
+          onClick={() =>
+            void mutate(moveAtom, { id: source.id, parentId: folderId }).then((exit) => {
+              if (Exit.isSuccess(exit)) close()
+            })
+          }
+        >
+          Move to {listing?.directory?.name ?? "CloudSync"}
+        </Button>
+      </DialogFooter>
+    </>
   )
 }
 
