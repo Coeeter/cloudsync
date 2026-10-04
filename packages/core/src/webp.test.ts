@@ -27,6 +27,11 @@ describe("isAnimatedWebP", () => {
     expect(isAnimatedWebP(container("ANIM", [0, 0, 0, 0, 0, 0]))).toBe(true)
   })
 
+  test("treats other formats with a .webp name as not animated", () => {
+    const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex")
+    expect(isAnimatedWebP(png)).toBe(false)
+  })
+
   test("rejects truncated containers", () => {
     expect(() => isAnimatedWebP(container("VP8X", [0x02]).subarray(0, 12))).toThrow()
   })

@@ -31,11 +31,13 @@ integration("Preview worker with real persistence and development CDN", () => {
     const badId = crypto.randomUUID()
     const goodId = crypto.randomUUID()
     const missingId = crypto.randomUUID()
-    const ids = [badId, goodId, missingId]
+    const mislabelledId = crypto.randomUUID()
+    const ids = [badId, goodId, missingId, mislabelledId]
     const badKey = `objects/cdn-validation/${badId}.webp`
     const goodKey = `objects/cdn-validation/${goodId}.png`
     const missingKey = `objects/cdn-validation/${missingId}.png`
-    const keys = [badKey, goodKey]
+    const mislabelledKey = `objects/cdn-validation/${mislabelledId}.webp`
+    const keys = [badKey, goodKey, mislabelledKey]
     const badWebP = Buffer.from("524946460c00000057454250414e494d00000000", "hex")
     const png = Buffer.from(
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZXkAAAAASUVORK5CYII=",
@@ -49,6 +51,7 @@ integration("Preview worker with real persistence and development CDN", () => {
         yield* Effect.gen(function* () {
           yield* storage.put(badKey, badWebP, "image/webp")
           yield* storage.put(goodKey, png, "image/png")
+          yield* storage.put(mislabelledKey, png, "image/webp")
           yield* db.execute("fixture", async (client) => {
             await client.insert(schema.entries).values(
               ids.map((id, index) => ({
@@ -56,8 +59,8 @@ integration("Preview worker with real persistence and development CDN", () => {
                 name: `fixture-${id}`,
                 normalizedName: `fixture-${id}`,
                 kind: "file" as const,
-                objectKey: [badKey, goodKey, missingKey][index],
-                mimeType: index === 0 ? "image/webp" : "image/png",
+                objectKey: [badKey, goodKey, missingKey, mislabelledKey][index],
+                mimeType: index === 0 || index === 3 ? "image/webp" : "image/png",
                 size: index === 0 ? badWebP.length : png.length,
               })),
             )
@@ -65,7 +68,7 @@ integration("Preview worker with real persistence and development CDN", () => {
               .insert(schema.jobs)
               .values(ids.map((entryId) => ({ kind: "preview", payload: { entryId } })))
           })
-          for (let count = 0; count < 3; count++) yield* worker.runOnce
+          for (let count = 0; count < ids.length; count++) yield* worker.runOnce
           const rows = yield* db.execute("inspect", (client) =>
             client.select().from(schema.entries).where(inArray(schema.entries.id, ids)),
           )
@@ -88,6 +91,12 @@ integration("Preview worker with real persistence and development CDN", () => {
           expect(good.previewKey).not.toBeNull()
           expect(good.previewError).toBeNull()
           keys.push(good.thumbnailKey, good.previewKey)
+          const mislabelled = rows.find((row) => row.id === mislabelledId)
+          if (!mislabelled?.thumbnailKey || !mislabelled.previewKey)
+            return yield* Effect.die("PNG stored as WebP did not get a preview")
+          expect(mislabelled.previewError).toBeNull()
+          expect(mislabelled.isAnimated).toBe(false)
+          keys.push(mislabelled.thumbnailKey, mislabelled.previewKey)
           const object = yield* storage.get(good.thumbnailKey)
           const header = yield* Effect.promise(async () => {
             const chunks = []
