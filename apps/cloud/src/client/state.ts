@@ -77,7 +77,11 @@ const loadedCount = (previous: Option.Option<Atom.PullResult<DirectoryListing, u
     Option.getOrUndefined,
   )
 
-const listingPages = (parentId: string | null, firstPageSize: number | undefined) =>
+const listingPages = (
+  parentId: string | null,
+  firstPageSize: number | undefined,
+  pageSize?: number,
+) =>
   Stream.paginate({ cursor: undefined as string | undefined, limit: firstPageSize }, (page) =>
     CloudSync.use((client) => client("catalog.list", { parentId, ...page })).pipe(
       Effect.map(
@@ -85,7 +89,7 @@ const listingPages = (parentId: string | null, firstPageSize: number | undefined
           [
             [listing],
             listing.nextCursor
-              ? Option.some({ cursor: listing.nextCursor, limit: undefined })
+              ? Option.some({ cursor: listing.nextCursor, limit: pageSize })
               : Option.none(),
           ] as const,
       ),
@@ -100,6 +104,46 @@ export const folderAtom = Atom.family((parentId: string | null) =>
     .pull((get) => listingPages(parentId, loadedCount(get.self())))
     .pipe(Atom.withReactivity(catalogKeys), Atom.setIdleTTL("10 minutes")),
 )
+
+export const isReaderImage = (entry: Entry) =>
+  entry.kind === "file" && entry.previewKind === "image"
+
+export interface Reader {
+  readonly directory: Entry | null
+  readonly breadcrumbs: ReadonlyArray<Breadcrumb>
+  readonly images: ReadonlyArray<Entry>
+}
+
+/** Every image directly inside a folder, in listing order. */
+export const readerAtom = Atom.family((folderId: string) =>
+  CloudSync.runtime
+    .atom(
+      listingPages(folderId, maxPageSize, maxPageSize).pipe(
+        Stream.runCollect,
+        Effect.map(
+          (pages): Reader => ({
+            directory: pages[0]?.directory ?? null,
+            breadcrumbs: pages[0]?.breadcrumbs ?? [],
+            images: pages.flatMap((page) => page.entries).filter(isReaderImage),
+          }),
+        ),
+      ),
+    )
+    .pipe(Atom.withReactivity(catalogKeys), Atom.setIdleTTL("10 minutes")),
+)
+
+/** Reader route loader: null when signed out or the folder cannot be read. */
+export const loadReader = (folderId: string) =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const session = yield* AtomRegistry.getResult(registry, sessionAtom, {
+        suspendOnWaiting: true,
+      }).pipe(Effect.option)
+      if (Option.isNone(session)) return null
+      yield* revalidate(readerAtom(folderId))
+      return Option.getOrNull(AsyncResult.value(registry.get(readerAtom(folderId))))
+    }),
+  )
 
 export const recycleBinAtom = CloudSync.query(
   "catalog.recycleBin",

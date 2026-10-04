@@ -32,6 +32,7 @@ import { createFileRoute, Link, useRouter } from "@tanstack/react-router"
 import { Exit } from "effect"
 import { AsyncResult } from "effect/unstable/reactivity"
 import {
+  BookOpen,
   ChevronLeft,
   ChevronRight,
   Download,
@@ -54,7 +55,6 @@ import {
   X,
 } from "lucide-react"
 import {
-  type AnchorHTMLAttributes,
   type ChangeEvent,
   type DragEvent,
   type FormEvent,
@@ -63,6 +63,7 @@ import {
   useRef,
   useState,
 } from "react"
+import { CheckingScreen, FolderLink, imageSource } from "../client/components"
 import {
   activeEntryIdAtom,
   createFolderAtom,
@@ -74,6 +75,7 @@ import {
   errorAtom,
   folderAtom,
   folderViewAtom,
+  isReaderImage,
   moveAtom,
   moveFolderAtom,
   moveFolderIdAtom,
@@ -121,14 +123,6 @@ function CloudSyncApp() {
   if (AsyncResult.isSuccess(session)) return <FileBrowser />
   if (AsyncResult.isInitial(session)) return <CheckingScreen />
   return <SignIn />
-}
-
-function CheckingScreen() {
-  return (
-    <main className="grid min-h-screen place-items-center p-6">
-      <p className="mb-3.5 text-muted-foreground leading-normal">Opening your archive…</p>
-    </main>
-  )
 }
 
 function SignIn() {
@@ -422,6 +416,14 @@ function FileBrowser() {
                   </button>
                 ) : null}
               </div>
+              {folder !== null && !searching && current.entries.some(isReaderImage) ? (
+                <Button asChild variant="ghost">
+                  <Link to="/reader/$folderId" params={{ folderId: folder }}>
+                    <BookOpen size={16} />
+                    <span className="max-sm:hidden">Reader</span>
+                  </Link>
+                </Button>
+              ) : null}
               <Button
                 size="icon"
                 variant="ghost"
@@ -587,23 +589,6 @@ function FileBrowser() {
       <Lightbox entry={activeEntry} entries={entries} />
       <MoveDialog source={moveSource} />
     </main>
-  )
-}
-
-function FolderLink({
-  folder,
-  recycle = false,
-  ...props
-}: Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "href"> & {
-  folder: string | null
-  recycle?: boolean
-}) {
-  return (
-    <Link
-      to="/"
-      search={{ folder: folder ?? undefined, recycle: recycle ? true : undefined }}
-      {...props}
-    />
   )
 }
 
@@ -1111,12 +1096,7 @@ function LightboxMedia({ entry }: { entry: Entry }) {
       </div>
     )
   }
-  // Generated previews are static WebP. Unknown WebP uses the original until classified so an
-  // existing animation never silently becomes a still image.
-  const originalImage =
-    entry.mimeType === "image/gif" ||
-    (entry.mimeType === "image/webp" && entry.isAnimated !== false)
-  const src = originalImage ? entry.contentUrl : (entry.previewUrl ?? entry.contentUrl)
+  const src = imageSource(entry)
   if (entry.previewKind === "image" && src) {
     return (
       <div className="absolute inset-x-4 top-16 bottom-4 flex items-center justify-center max-sm:inset-x-0 max-sm:bottom-0">
