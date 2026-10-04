@@ -13,32 +13,36 @@ export interface UploadProgress {
 }
 
 export const registry = AtomRegistry.make()
-export const authViewAtom = Atom.make<AuthView>("checking")
-export const emailAtom = Atom.make("")
-export const sessionAtom = Atom.make<Session | null>(null)
-export const listingAtom = Atom.make<DirectoryListing | null>(null)
-export const queryAtom = Atom.make("")
-export const searchResultsAtom = Atom.make<ReadonlyArray<SearchResult>>([])
-export const searchLoadingAtom = Atom.make(false)
-export const searchTruncatedAtom = Atom.make(false)
-export const recycleEntriesAtom = Atom.make<ReadonlyArray<Entry>>([])
-export const busyAtom = Atom.make(false)
-export const errorAtom = Atom.make<string | null>(null)
-export const noticeAtom = Atom.make<string | null>(null)
-export const uploadProgressAtom = Atom.make<UploadProgress | null>(null)
-export const dragActiveAtom = Atom.make(false)
-export const viewAtom = Atom.make<"files" | "recycle">("files")
+
+// Route loaders write state before any component subscribes, and unsubscribed atoms reset.
+const state = <A>(initial: A) => Atom.keepAlive(Atom.make<A>(initial))
+
+export const authViewAtom = state<AuthView>("checking")
+export const emailAtom = state("")
+export const sessionAtom = state<Session | null>(null)
+export const listingAtom = state<DirectoryListing | null>(null)
+export const queryAtom = state("")
+export const searchResultsAtom = state<ReadonlyArray<SearchResult>>([])
+export const searchLoadingAtom = state(false)
+export const searchTruncatedAtom = state(false)
+export const recycleEntriesAtom = state<ReadonlyArray<Entry>>([])
+export const busyAtom = state(false)
+export const errorAtom = state<string | null>(null)
+export const noticeAtom = state<string | null>(null)
+export const uploadProgressAtom = state<UploadProgress | null>(null)
+export const dragActiveAtom = state(false)
+export const viewAtom = state<"files" | "recycle">("files")
 /** The Recycle Bin folder being browsed; null shows the Recycle Bin's top-level items. */
-export const recycleListingAtom = Atom.make<DirectoryListing | null>(null)
-export const loadingMoreAtom = Atom.make(false)
-export const activeEntryAtom = Atom.make<Entry | null>(null)
-export const moveSourceAtom = Atom.make<Entry | null>(null)
-export const moveListingAtom = Atom.make<DirectoryListing | null>(null)
-export const newFolderOpenAtom = Atom.make(false)
-export const newFolderNameAtom = Atom.make("")
-export const renameEntryAtom = Atom.make<Entry | null>(null)
-export const renameValueAtom = Atom.make("")
-export const pendingDeleteAtom = Atom.make<{
+export const recycleListingAtom = state<DirectoryListing | null>(null)
+export const loadingMoreAtom = state(false)
+export const activeEntryAtom = state<Entry | null>(null)
+export const moveSourceAtom = state<Entry | null>(null)
+export const moveListingAtom = state<DirectoryListing | null>(null)
+export const newFolderOpenAtom = state(false)
+export const newFolderNameAtom = state("")
+export const renameEntryAtom = state<Entry | null>(null)
+export const renameValueAtom = state("")
+export const pendingDeleteAtom = state<{
   readonly entry: Entry
   readonly permanent: boolean
 } | null>(null)
@@ -74,6 +78,18 @@ const run = <A>(effect: Effect.Effect<A, unknown>) =>
 
 const currentFolderId = () => registry.get(listingAtom)?.directory?.id ?? null
 
+// Keeps every page loaded so far, so returning to a folder renders the same height and the
+// router can restore the scroll position before the background refresh lands.
+const listingCache = new Map<string | null, DirectoryListing>()
+
+function setListing(listing: DirectoryListing) {
+  listingCache.set(listing.directory?.id ?? null, listing)
+  registry.set(listingAtom, listing)
+}
+
+let booted: Promise<void> | null = null
+let latestVisit = 0
+
 const needsPreview = (entry: Entry) => entry.kind === "file" && entry.previewStatus === "pending"
 
 let previewPoll: ReturnType<typeof setTimeout> | null = null
@@ -106,8 +122,9 @@ function schedulePreviewPoll(listing: DirectoryListing, reset: boolean) {
 let searchRequest = 0
 
 export const actions = {
-  boot: (parentId: string | null = null, recycle = false) =>
-    run(
+  /** Runs once per page load; every route load waits on it before touching the catalog. */
+  boot: () =>
+    (booted ??= run(
       attempt(() => runRpc((client) => client["auth.session"]({}))).pipe(
         Effect.tap((session) =>
           Effect.sync(() => {
@@ -117,10 +134,11 @@ export const actions = {
         ),
         // Re-issues the short-lived CloudFront viewer cookies for a long-lived session.
         Effect.tap(() => establishSession(undefined).pipe(Effect.ignore)),
-        Effect.flatMap(() => (recycle ? Effect.void : loadDirectory(parentId))),
         Effect.catch(() => Effect.sync(() => registry.set(authViewAtom, "email"))),
       ),
-    ),
+    )),
+
+  visit: (folder: string | null, recycle: boolean) => run(visit(folder, recycle)),
 
   requestPin: (email: string) =>
     run(
@@ -170,7 +188,6 @@ export const actions = {
               registry.set(authViewAtom, "authenticated")
             }),
           ),
-          Effect.flatMap(() => loadDirectory(null)),
         ),
       ),
     ),
@@ -182,6 +199,7 @@ export const actions = {
           Effect.sync(() => {
             registry.set(sessionAtom, null)
             registry.set(listingAtom, null)
+            listingCache.clear()
             registry.set(errorAtom, null)
             registry.set(authViewAtom, "email")
           }),
@@ -190,8 +208,6 @@ export const actions = {
     ),
 
   dismissError: () => registry.set(errorAtom, null),
-
-  openDirectory: (id: string | null) => run(withBusy(loadDirectory(id))),
 
   refresh: () => run(loadDirectory(currentFolderId(), { keepQuery: true })),
 
@@ -239,7 +255,7 @@ export const actions = {
           Effect.sync(() => {
             const currentListing = registry.get(listingAtom)
             if (currentListing?.nextCursor !== cursor) return
-            registry.set(listingAtom, {
+            setListing({
               ...currentListing,
               entries: [...currentListing.entries, ...page.entries],
               nextCursor: page.nextCursor,
@@ -484,6 +500,33 @@ export const actions = {
     ),
 }
 
+const visit = Effect.fn("visit")(function* (folder: string | null, recycle: boolean) {
+  const id = ++latestVisit
+  const isLatest = () => id === latestVisit
+  yield* Effect.promise(() => actions.boot())
+  if (!isLatest() || registry.get(authViewAtom) !== "authenticated") return
+  if (recycle) {
+    return yield* Effect.promise(() =>
+      folder === null ? actions.showRecycleBin() : actions.openRecycleFolder(folder),
+    )
+  }
+  const show = (listing: DirectoryListing) => {
+    if (!isLatest()) return
+    registry.set(viewAtom, "files")
+    setListing(listing)
+    schedulePreviewPoll(listing, true)
+  }
+  const cached = listingCache.get(folder)
+  // Re-fetch as many entries as were showing so the restored scroll position stays valid.
+  const load = fetchListing(folder, cached?.entries.length).pipe(
+    Effect.tap((listing) => Effect.sync(() => show(listing))),
+  )
+  clearSearch()
+  if (!cached) return yield* withBusy(load)
+  show(cached)
+  yield* load.pipe(Effect.ignore, Effect.forkDetach)
+})
+
 function startDownload(url: string) {
   const anchor = document.createElement("a")
   anchor.href = url
@@ -508,22 +551,28 @@ function loadDirectory(
     readonly limit?: number
   } = {},
 ) {
-  const limit = options.limit && options.limit > 0 ? Math.min(options.limit, 600) : undefined
-  return attempt(() => runRpc((client) => client["catalog.list"]({ parentId, limit }))).pipe(
+  return fetchListing(parentId, options.limit).pipe(
     Effect.tap((listing) =>
       Effect.sync(() => {
         registry.set(viewAtom, "files")
-        registry.set(listingAtom, listing)
-        if (!options.keepQuery) {
-          registry.set(queryAtom, "")
-          registry.set(searchResultsAtom, [])
-          registry.set(searchLoadingAtom, false)
-          registry.set(searchTruncatedAtom, false)
-        }
+        setListing(listing)
+        if (!options.keepQuery) clearSearch()
         schedulePreviewPoll(listing, options.resetPoll ?? true)
       }),
     ),
   )
+}
+
+function fetchListing(parentId: string | null, loaded?: number) {
+  const limit = loaded && loaded > 0 ? Math.min(loaded, 600) : undefined
+  return attempt(() => runRpc((client) => client["catalog.list"]({ parentId, limit })))
+}
+
+function clearSearch() {
+  registry.set(queryAtom, "")
+  registry.set(searchResultsAtom, [])
+  registry.set(searchLoadingAtom, false)
+  registry.set(searchTruncatedAtom, false)
 }
 
 function reloadRecycleBin() {

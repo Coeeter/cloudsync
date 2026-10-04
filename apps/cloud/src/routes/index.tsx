@@ -28,7 +28,7 @@ import {
 import { Input } from "@cloudsync/ui/components/input"
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@cloudsync/ui/components/input-otp"
 import { Progress } from "@cloudsync/ui/components/progress"
-import { createFileRoute } from "@tanstack/react-router"
+import { createFileRoute, Link, useRouter } from "@tanstack/react-router"
 import {
   ChevronLeft,
   ChevronRight,
@@ -52,6 +52,7 @@ import {
   X,
 } from "lucide-react"
 import {
+  type AnchorHTMLAttributes,
   type ChangeEvent,
   type DragEvent,
   type FormEvent,
@@ -95,26 +96,22 @@ export const Route = createFileRoute("/")({
     folder: typeof search.folder === "string" && search.folder ? search.folder : undefined,
     recycle: search.recycle === true || search.recycle === "true" ? true : undefined,
   }),
+  // The catalog is only reachable with the browser's session cookie.
+  ssr: false,
+  loaderDeps: ({ search }) => search,
+  loader: ({ deps }) => actions.visit(deps.folder ?? null, deps.recycle === true),
+  pendingComponent: () => <AuthScreen view="checking" />,
   component: CloudSyncApp,
 })
 
 function CloudSyncApp() {
   const authView = useAtomValue(authViewAtom)
-  const location = Route.useSearch()
-  const initialLocation = useRef(location)
-
-  useEffect(() => {
-    void actions.boot(
-      initialLocation.current.folder ?? null,
-      initialLocation.current.recycle === true,
-    )
-  }, [])
-
   if (authView !== "authenticated") return <AuthScreen view={authView} />
   return <FileBrowser />
 }
 
 function AuthScreen({ view }: { view: "checking" | "email" | "pin" }) {
+  const router = useRouter()
   const busy = useAtomValue(busyAtom)
   const error = useAtomValue(errorAtom)
   const notice = useAtomValue(noticeAtom)
@@ -140,7 +137,7 @@ function AuthScreen({ view }: { view: "checking" | "email" | "pin" }) {
   }
 
   const submitCode = (value: string) => {
-    if (value.length === 6 && !busy) void actions.verifyPin(value)
+    if (value.length === 6 && !busy) void actions.verifyPin(value).then(() => router.invalidate())
   }
 
   return (
@@ -230,8 +227,6 @@ function AuthScreen({ view }: { view: "checking" | "email" | "pin" }) {
 }
 
 function FileBrowser() {
-  const location = Route.useSearch()
-  const navigate = Route.useNavigate()
   const listing = useAtomValue(listingAtom)
   const query = useAtomValue(queryAtom)
   const searchResults = useAtomValue(searchResultsAtom)
@@ -256,14 +251,6 @@ function FileBrowser() {
   const folderInput = useRef<HTMLInputElement>(null)
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const dragDepth = useRef(0)
-  const routeFolder = location.folder ?? null
-  const navigateFolder = (folder: string | null, recycle = location.recycle === true) =>
-    navigate({
-      search: {
-        folder: folder ?? undefined,
-        recycle: recycle ? true : undefined,
-      },
-    })
 
   const onSearch = (event: ChangeEvent<HTMLInputElement>) => {
     const value = event.target.value
@@ -345,20 +332,6 @@ function FileBrowser() {
     }
   }, [])
 
-  useEffect(() => {
-    if (location.recycle) {
-      const current = recycleListing?.directory?.id ?? null
-      if (view !== "recycle") {
-        void actions.showRecycleBin()
-      } else if (current !== routeFolder) {
-        void actions.openRecycleFolder(routeFolder)
-      }
-      return
-    }
-    const current = listing?.directory?.id ?? null
-    if (view !== "files" || current !== routeFolder) void actions.openDirectory(routeFolder)
-  }, [location.recycle, routeFolder, view, listing?.directory?.id, recycleListing?.directory?.id])
-
   return (
     <main
       className="min-h-screen px-4 pt-[max(1.5rem,env(safe-area-inset-top))] pb-16 sm:px-6 lg:px-12"
@@ -371,14 +344,12 @@ function FileBrowser() {
     >
       <header className="sticky top-0 z-20 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-5 bg-[linear-gradient(var(--carbon)_72%,transparent)] pt-2.5 pb-5 max-sm:grid-cols-1 max-sm:gap-2">
         <nav
-          className="flex min-w-0 items-center gap-2 overflow-hidden text-base text-muted-foreground lg:text-lg [&_button]:overflow-hidden [&_button]:border-0 [&_button]:bg-transparent [&_button]:px-px [&_button]:py-1 [&_button]:text-inherit [&_button]:text-ellipsis [&_button]:whitespace-nowrap [&_button:hover]:text-foreground [&_button[aria-current=page]]:font-semibold [&_button[aria-current=page]]:text-foreground"
+          className="flex min-w-0 items-center gap-2 overflow-hidden text-base text-muted-foreground lg:text-lg [&_a]:overflow-hidden [&_a]:border-0 [&_a]:bg-transparent [&_a]:px-px [&_a]:py-1 [&_a]:text-inherit [&_a]:text-ellipsis [&_a]:whitespace-nowrap [&_a:hover]:text-foreground [&_a[aria-current=page]]:font-semibold [&_a[aria-current=page]]:text-foreground"
           aria-label="Current folder"
         >
           {view === "recycle" ? (
             <>
-              <button type="button" onClick={() => void navigateFolder(null, false)}>
-                CloudSync
-              </button>
+              <FolderLink folder={null}>CloudSync</FolderLink>
               {(recycleListing?.breadcrumbs ?? [{ id: null, name: "Recycle Bin" }]).map(
                 (crumb, index, crumbs) => (
                   <span
@@ -386,13 +357,13 @@ function FileBrowser() {
                     className="inline-flex min-w-0 items-center gap-2"
                   >
                     <span aria-hidden="true">/</span>
-                    <button
-                      type="button"
+                    <FolderLink
+                      folder={crumb.id}
+                      recycle
                       aria-current={index === crumbs.length - 1 ? "page" : undefined}
-                      onClick={() => void navigateFolder(crumb.id, true)}
                     >
                       {crumb.name}
-                    </button>
+                    </FolderLink>
                   </span>
                 ),
               )}
@@ -401,13 +372,12 @@ function FileBrowser() {
             (listing?.breadcrumbs ?? []).map((crumb, index, crumbs) => (
               <span key={crumb.id ?? "root"} className="inline-flex min-w-0 items-center gap-2">
                 {index > 0 ? <span aria-hidden="true">/</span> : null}
-                <button
-                  type="button"
+                <FolderLink
+                  folder={crumb.id}
                   aria-current={index === crumbs.length - 1 ? "page" : undefined}
-                  onClick={() => void navigateFolder(crumb.id, false)}
                 >
                   {crumb.name}
-                </button>
+                </FolderLink>
               </span>
             ))
           )}
@@ -474,12 +444,16 @@ function FileBrowser() {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               {view === "files" ? (
-                <DropdownMenuItem onSelect={() => void navigateFolder(null, true)}>
-                  <Trash2 /> Recycle Bin
+                <DropdownMenuItem asChild>
+                  <FolderLink folder={null} recycle>
+                    <Trash2 /> Recycle Bin
+                  </FolderLink>
                 </DropdownMenuItem>
               ) : (
-                <DropdownMenuItem onSelect={() => void navigateFolder(null, false)}>
-                  <Folder /> Back to files
+                <DropdownMenuItem asChild>
+                  <FolderLink folder={null}>
+                    <Folder /> Back to files
+                  </FolderLink>
                 </DropdownMenuItem>
               )}
               <DropdownMenuSeparator />
@@ -554,7 +528,6 @@ function FileBrowser() {
               entry={entry}
               recycle={recycleMode}
               searchPath={searching ? searchPathById.get(entry.id) : undefined}
-              openDirectory={(id) => void navigateFolder(id, recycleMode !== null)}
             />
           ))}
         </section>
@@ -607,16 +580,31 @@ function FileBrowser() {
   )
 }
 
+function FolderLink({
+  folder,
+  recycle = false,
+  ...props
+}: Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "href"> & {
+  folder: string | null
+  recycle?: boolean
+}) {
+  return (
+    <Link
+      to="/"
+      search={{ folder: folder ?? undefined, recycle: recycle ? true : undefined }}
+      {...props}
+    />
+  )
+}
+
 function EntryCard({
   entry,
   recycle,
   searchPath,
-  openDirectory,
 }: {
   entry: Entry
   recycle: "root" | "nested" | null
   searchPath?: string
-  openDirectory: (id: string) => void
 }) {
   const [broken, setBroken] = useState(false)
   const fallback =
@@ -634,85 +622,98 @@ function EntryCard({
       <FileIcon className="text-[#6c727d]" size={40} strokeWidth={1.2} />
     )
 
-  const open = () => {
-    if (entry.kind === "directory") {
-      openDirectory(entry.id)
-    } else registry.set(activeEntryAtom, entry)
-  }
+  const cardClass =
+    "group block w-full border-0 bg-transparent p-0 text-left text-inherit outline-none"
+  const card = (
+    <>
+      <div
+        className={
+          entry.kind === "directory"
+            ? "relative grid aspect-square place-items-center overflow-hidden rounded-lg border border-amber-300/40 bg-amber-950/20 p-2 ring-1 ring-amber-300/10 ring-inset before:absolute before:top-0 before:right-0 before:z-[2] before:h-[13%] before:w-[36%] before:origin-top-right before:translate-x-2 before:skew-x-[-24deg] before:border-b before:border-l before:border-amber-300/40 before:bg-amber-950 group-focus-visible:ring-2 group-focus-visible:ring-amber-300"
+            : "relative grid aspect-square place-items-center overflow-hidden rounded-lg border border-border bg-[#111317] group-focus-visible:ring-2 group-focus-visible:ring-ring"
+        }
+      >
+        {entry.thumbnailUrl && !broken ? (
+          <img
+            className={
+              entry.kind === "directory"
+                ? "size-full rounded-sm object-contain opacity-85"
+                : "size-full object-contain"
+            }
+            src={entry.thumbnailUrl}
+            alt=""
+            loading="lazy"
+            decoding="async"
+            onError={() => setBroken(true)}
+          />
+        ) : (
+          fallback
+        )}
+        {entry.kind === "file" && entry.previewKind === "video" && entry.thumbnailUrl ? (
+          <span className="absolute right-2 bottom-2 grid size-6 place-items-center rounded-md bg-[rgba(11,12,14,0.72)] text-foreground">
+            <Video size={12} />
+          </span>
+        ) : null}
+        {entry.kind === "directory" ? (
+          <span className="absolute bottom-2 left-2 flex items-center gap-1 rounded-md bg-amber-300 px-2 py-1 text-xs font-semibold text-amber-950 shadow-sm">
+            <Folder size={13} fill="currentColor" /> Folder
+          </span>
+        ) : null}
+        {entry.kind === "file" &&
+        entry.previewStatus !== "ready" &&
+        entry.previewKind !== "none" ? (
+          <span
+            className={
+              entry.previewStatus === "failed"
+                ? "absolute right-2 bottom-2 rounded-sm border border-destructive/45 bg-[rgba(11,12,14,0.82)] px-1.5 py-1 text-xs text-destructive"
+                : "absolute right-2 bottom-2 rounded-sm border border-[rgba(243,241,235,0.14)] bg-[rgba(11,12,14,0.82)] px-1.5 py-1 text-xs text-muted-foreground"
+            }
+          >
+            {entry.previewStatus === "failed" ? "Preview failed" : "Processing preview"}
+          </span>
+        ) : null}
+      </div>
+      <div className="grid gap-0.5 pt-2 pr-8 pl-0.5">
+        <span
+          className={`overflow-hidden text-sm font-medium text-ellipsis whitespace-nowrap ${entry.kind === "directory" ? "text-amber-100" : ""}`}
+        >
+          {entry.name}
+        </span>
+        {searchPath ? (
+          <span className="overflow-hidden text-xs text-muted-foreground text-ellipsis whitespace-nowrap">
+            {searchPath}
+          </span>
+        ) : null}
+        <span className="font-mono text-xs text-muted-foreground">
+          {entry.kind === "directory"
+            ? `${entry.childCount} item${entry.childCount === 1 ? "" : "s"}`
+            : formatBytes(entry.size)}
+        </span>
+      </div>
+    </>
+  )
 
   return (
     <article className="relative min-w-0">
-      <button
-        type="button"
-        className="group block w-full border-0 bg-transparent p-0 text-left text-inherit outline-none"
-        onClick={open}
-        title={entry.name}
-      >
-        <div
-          className={
-            entry.kind === "directory"
-              ? "relative grid aspect-square place-items-center overflow-hidden rounded-lg border border-amber-300/40 bg-amber-950/20 p-2 ring-1 ring-amber-300/10 ring-inset before:absolute before:top-0 before:right-0 before:z-[2] before:h-[13%] before:w-[36%] before:origin-top-right before:translate-x-2 before:skew-x-[-24deg] before:border-b before:border-l before:border-amber-300/40 before:bg-amber-950 group-focus-visible:ring-2 group-focus-visible:ring-amber-300"
-              : "relative grid aspect-square place-items-center overflow-hidden rounded-lg border border-border bg-[#111317] group-focus-visible:ring-2 group-focus-visible:ring-ring"
-          }
+      {entry.kind === "directory" ? (
+        <FolderLink
+          folder={entry.id}
+          recycle={recycle !== null}
+          className={cardClass}
+          title={entry.name}
         >
-          {entry.thumbnailUrl && !broken ? (
-            <img
-              className={
-                entry.kind === "directory"
-                  ? "size-full rounded-sm object-contain opacity-85"
-                  : "size-full object-contain"
-              }
-              src={entry.thumbnailUrl}
-              alt=""
-              loading="lazy"
-              decoding="async"
-              onError={() => setBroken(true)}
-            />
-          ) : (
-            fallback
-          )}
-          {entry.kind === "file" && entry.previewKind === "video" && entry.thumbnailUrl ? (
-            <span className="absolute right-2 bottom-2 grid size-6 place-items-center rounded-md bg-[rgba(11,12,14,0.72)] text-foreground">
-              <Video size={12} />
-            </span>
-          ) : null}
-          {entry.kind === "directory" ? (
-            <span className="absolute bottom-2 left-2 flex items-center gap-1 rounded-md bg-amber-300 px-2 py-1 text-xs font-semibold text-amber-950 shadow-sm">
-              <Folder size={13} fill="currentColor" /> Folder
-            </span>
-          ) : null}
-          {entry.kind === "file" &&
-          entry.previewStatus !== "ready" &&
-          entry.previewKind !== "none" ? (
-            <span
-              className={
-                entry.previewStatus === "failed"
-                  ? "absolute right-2 bottom-2 rounded-sm border border-destructive/45 bg-[rgba(11,12,14,0.82)] px-1.5 py-1 text-xs text-destructive"
-                  : "absolute right-2 bottom-2 rounded-sm border border-[rgba(243,241,235,0.14)] bg-[rgba(11,12,14,0.82)] px-1.5 py-1 text-xs text-muted-foreground"
-              }
-            >
-              {entry.previewStatus === "failed" ? "Preview failed" : "Processing preview"}
-            </span>
-          ) : null}
-        </div>
-        <div className="grid gap-0.5 pt-2 pr-8 pl-0.5">
-          <span
-            className={`overflow-hidden text-sm font-medium text-ellipsis whitespace-nowrap ${entry.kind === "directory" ? "text-amber-100" : ""}`}
-          >
-            {entry.name}
-          </span>
-          {searchPath ? (
-            <span className="overflow-hidden text-xs text-muted-foreground text-ellipsis whitespace-nowrap">
-              {searchPath}
-            </span>
-          ) : null}
-          <span className="font-mono text-xs text-muted-foreground">
-            {entry.kind === "directory"
-              ? `${entry.childCount} item${entry.childCount === 1 ? "" : "s"}`
-              : formatBytes(entry.size)}
-          </span>
-        </div>
-      </button>
+          {card}
+        </FolderLink>
+      ) : (
+        <button
+          type="button"
+          className={cardClass}
+          onClick={() => registry.set(activeEntryAtom, entry)}
+          title={entry.name}
+        >
+          {card}
+        </button>
+      )}
       {recycle === "nested" ? null : (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -1119,7 +1120,7 @@ function MoveDialog({ source }: { source: Entry | null }) {
           <DialogDescription>Open the destination folder, then choose Move here.</DialogDescription>
         </DialogHeader>
         <nav
-          className="flex gap-1.5 overflow-x-auto border-b border-border px-0.5 py-2 text-sm whitespace-nowrap text-muted-foreground [&_button]:border-0 [&_button]:bg-transparent [&_button]:p-0 [&_button]:text-inherit [&>span:last-child_button]:font-semibold [&>span:last-child_button]:text-foreground"
+          className="flex gap-1.5 overflow-x-auto border-b border-border px-0.5 py-2 text-sm whitespace-nowrap text-muted-foreground [&_a]:border-0 [&_a]:bg-transparent [&_a]:p-0 [&_a]:text-inherit [&>span:last-child_button]:font-semibold [&>span:last-child_button]:text-foreground"
           aria-label="Destination"
         >
           {(listing?.breadcrumbs ?? []).map((crumb, index) => (
