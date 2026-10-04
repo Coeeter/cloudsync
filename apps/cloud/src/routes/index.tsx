@@ -327,7 +327,7 @@ function FileBrowser() {
       (records) => {
         if (records.some((record) => record.isIntersecting)) void actions.loadMore()
       },
-      { rootMargin: "75rem 0rem" },
+      { rootMargin: "1200px 0px" },
     )
     observer.observe(node)
     return () => observer.disconnect()
