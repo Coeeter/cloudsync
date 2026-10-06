@@ -41,6 +41,18 @@ bun run test
 bun run build
 ```
 
+Folder cover selection has a database-only regression suite:
+
+```sh
+CLOUDSYNC_TEST_DATABASE_URL=postgres://cloudsync:cloudsync@127.0.0.1:54329/cloudsync_worker_test bun test apps/cloud/src/server/services/folder-covers.integration.test.ts
+```
+
+Direct-child covers keep their existing precedence. Folders without one use the nearest
+descendant image with a ready thumbnail, ordered by natural path and ID for stable ties.
+The batched recursive query walks directory metadata only, stops covered branches, and
+keeps active and trashed subtrees separate. No persisted cover cache or schema migration
+is needed; subsequent listings reflect moves, renames, deletes, and completed previews.
+
 Production inspection uses `docker --context remote`. Do not run integration fixtures against the production database or bucket. Nas deploys the built image through Dokploy.
 
 ## Desktop previews and releases

@@ -23,6 +23,7 @@ import {
 import { and, eq, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm"
 import { Context, Effect, Layer, Schema } from "effect"
 import { CloudConfig } from "../config"
+import { folderCovers } from "./folder-covers"
 import { Storage, type StorageError } from "./storage"
 
 type EntryRow = typeof schema.entries.$inferSelect
@@ -111,7 +112,7 @@ const decodeCursor = (cursor: string) =>
 
 type Condition = ReturnType<typeof and>
 
-/** Folder covers (first naturally sorted child with a thumbnail) and child counts. */
+/** Covers may come from descendants; counts still describe immediate children. */
 async function folderSummaries(
   db: DbLike,
   rows: ReadonlyArray<EntryRow>,
@@ -120,21 +121,7 @@ async function folderSummaries(
   const directoryIds = rows.filter((row) => row.kind === "directory").map((row) => row.id)
   if (directoryIds.length === 0) return { covers: [], counts: [] }
   const [covers, counts] = await Promise.all([
-    db
-      .selectDistinctOn([schema.entries.parentId], {
-        parentId: schema.entries.parentId,
-        thumbnailKey: schema.entries.thumbnailKey,
-      })
-      .from(schema.entries)
-      .where(
-        and(
-          inArray(schema.entries.parentId, directoryIds),
-          eq(schema.entries.kind, "file"),
-          isNotNull(schema.entries.thumbnailKey),
-          childCondition,
-        ),
-      )
-      .orderBy(schema.entries.parentId, naturalName, schema.entries.id),
+    folderCovers(db, directoryIds),
     db
       .select({ parentId: schema.entries.parentId, count: sql<number>`count(*)::int` })
       .from(schema.entries)
