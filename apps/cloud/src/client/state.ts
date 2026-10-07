@@ -248,7 +248,6 @@ export const recycleViewAtom = Atom.family((parentId: string | null) =>
 export const visit = (folder: string | null, recycle: boolean) =>
   Effect.runPromise(
     Effect.gen(function* () {
-      registry.set(searchQueryAtom, "")
       const session = yield* AtomRegistry.getResult(registry, sessionAtom, {
         suspendOnWaiting: true,
       }).pipe(Effect.option)

@@ -113,7 +113,11 @@ export const Route = createFileRoute("/")({
   // The catalog is only reachable with the browser's session cookie.
   ssr: false,
   loaderDeps: ({ search }) => search,
-  loader: ({ deps }) => visit(deps.folder ?? null, deps.recycle === true),
+  loader: ({ deps, preload }) => {
+    // Hovering or focusing a folder link preloads it without leaving the search results.
+    if (!preload) registry.set(searchQueryAtom, "")
+    return visit(deps.folder ?? null, deps.recycle === true)
+  },
   pendingComponent: CheckingScreen,
   component: CloudSyncApp,
 })
