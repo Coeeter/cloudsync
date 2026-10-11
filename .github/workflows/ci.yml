@@ -59,3 +59,14 @@ jobs:
           tags: |
             ghcr.io/coeeter/cloudsync:latest
             ghcr.io/coeeter/cloudsync:${{ github.sha }}
+
+      # web and worker are separate Dokploy image applications pulling `latest`; their deploy
+      # webhooks are only hit after the push above, so neither can pull a stale image.
+      - name: Deploy to Dokploy
+        run: |
+          for url in "$DOKPLOY_WEB_DEPLOY_URL" "$DOKPLOY_WORKER_DEPLOY_URL"; do
+            curl --fail-with-body --silent --show-error --retry 3 -X POST "$url"
+          done
+        env:
+          DOKPLOY_WEB_DEPLOY_URL: ${{ secrets.DOKPLOY_WEB_DEPLOY_URL }}
+          DOKPLOY_WORKER_DEPLOY_URL: ${{ secrets.DOKPLOY_WORKER_DEPLOY_URL }}
