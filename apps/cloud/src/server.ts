@@ -15,8 +15,7 @@ export default createServerEntry({
       path === "/rpc" ||
       path === "/auth/establish" ||
       path === "/auth/logout" ||
-      path === "/health" ||
-      path.startsWith("/download/folder/")
+      path === "/health"
     ) {
       return rpcWebHandler.handler(request, Context.empty())
     }

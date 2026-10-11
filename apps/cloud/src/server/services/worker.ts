@@ -5,9 +5,11 @@ import { and, eq, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm"
 import { Context, Effect, FileSystem, Layer, Path, Schema, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { Storage, StorageError } from "./storage"
+import { buildArchive } from "./archives"
 
 const PreviewPayload = Schema.Struct({ entryId: Schema.String })
 const DeletePayload = Schema.Struct({ objectKeys: Schema.Array(Schema.String) })
+const ArchivePayload = Schema.Struct({ archiveId: Schema.String })
 type JobRow = typeof schema.jobs.$inferSelect
 type WorkerFailure = DatabaseError | StorageError
 
@@ -318,24 +320,45 @@ export class Worker extends Context.Service<Worker, WorkerShape>()("@cloudsync/c
       })
 
       const processJob = (job: JobRow): Effect.Effect<void, DatabaseError> => {
-        const task = (
-          job.kind === "preview"
-            ? createPreview(job)
-            : job.kind === "delete_objects"
-              ? deleteObjects(job)
-              : Effect.fail(
-                  new WorkerJobError({ message: `Unknown job kind: ${job.kind}`, cause: null }),
-                )
-        ).pipe(
-          Effect.asVoid,
-          // Must stay under the 15-minute lock so a stalled job is retried rather than held forever.
-          Effect.timeout("10 minutes"),
+        const task = Effect.gen(function* () {
+          if (job.kind === "preview") yield* createPreview(job)
+          else if (job.kind === "archive") {
+            const { archiveId } = yield* Schema.decodeUnknownEffect(ArchivePayload)(job.payload)
+            yield* buildArchive(archiveId, database, storage)
+          } else if (job.kind === "delete_objects") yield* deleteObjects(job)
+          else
+            return yield* new WorkerJobError({
+              message: `Unknown job kind: ${job.kind}`,
+              cause: null,
+            })
+        }).pipe(
+          Effect.timeout(job.kind === "archive" ? "2 hours" : "10 minutes"),
           Effect.catchTag("TimeoutError", (cause) =>
-            Effect.fail(new WorkerJobError({ message: "Job timed out after 10 minutes", cause })),
+            Effect.fail(new WorkerJobError({ message: "Job timed out", cause })),
           ),
         )
 
-        return task.pipe(
+        const running =
+          job.kind === "archive"
+            ? Effect.gen(function* () {
+                // Large archives can exceed the stale-lock window; renew ownership while building.
+                yield* Effect.forkScoped(
+                  Effect.sleep("30 seconds").pipe(
+                    Effect.andThen(
+                      database.execute("worker.heartbeat", (db) =>
+                        db
+                          .update(schema.jobs)
+                          .set({ lockedAt: new Date() })
+                          .where(eq(schema.jobs.id, job.id)),
+                      ),
+                    ),
+                    Effect.forever,
+                  ),
+                )
+                yield* task
+              }).pipe(Effect.scoped)
+            : task
+        return running.pipe(
           Effect.tap(() =>
             database.execute("worker.complete", (db) =>
               db
@@ -346,7 +369,8 @@ export class Worker extends Context.Service<Worker, WorkerShape>()("@cloudsync/c
           ),
           Effect.catch((cause) =>
             Effect.gen(function* () {
-              const terminal = cause instanceof PreviewDecodeError || job.attempts >= 5
+              const terminal =
+                job.kind === "archive" || cause instanceof PreviewDecodeError || job.attempts >= 5
               yield* database.execute("worker.fail", (db) =>
                 db
                   .update(schema.jobs)
@@ -368,6 +392,20 @@ export class Worker extends Context.Service<Worker, WorkerShape>()("@cloudsync/c
                       .where(eq(schema.entries.id, parsed.value.entryId)),
                   )
                 }
+              }
+              if (job.kind === "archive") {
+                const parsed = Schema.decodeUnknownExit(ArchivePayload)(job.payload)
+                if (parsed._tag === "Success")
+                  yield* database.execute("worker.archiveError", (db) =>
+                    db
+                      .update(schema.archives)
+                      .set({
+                        status: "failed",
+                        error:
+                          cause instanceof Error ? cause.message : "Archive preparation failed",
+                      })
+                      .where(eq(schema.archives.id, parsed.value.archiveId)),
+                  )
               }
               yield* Effect.logError("Worker job failed").pipe(
                 Effect.annotateLogs({ jobId: job.id, kind: job.kind, terminal }),
@@ -416,6 +454,15 @@ export class Worker extends Context.Service<Worker, WorkerShape>()("@cloudsync/c
           }
           await tx.delete(schema.sessions).where(lte(schema.sessions.expiresAt, new Date()))
           await tx.delete(schema.authPins).where(lte(schema.authPins.expiresAt, new Date()))
+          const expiredArchives = await tx
+            .delete(schema.archives)
+            .where(lte(schema.archives.expiresAt, new Date()))
+            .returning({ objectKey: schema.archives.objectKey })
+          if (expiredArchives.length)
+            await tx.insert(schema.jobs).values({
+              kind: "delete_objects",
+              payload: { objectKeys: expiredArchives.map((archive) => archive.objectKey) },
+            })
           const abandoned = await tx
             .delete(schema.uploads)
             .where(

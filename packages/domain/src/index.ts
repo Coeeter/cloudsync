@@ -86,6 +86,25 @@ export class DownloadTicket extends Schema.Class<DownloadTicket>("DownloadTicket
   expiresAt: Schema.String,
 }) {}
 
+export const BulkAction = Schema.Literals(["trash", "restore", "delete", "move"])
+export type BulkAction = typeof BulkAction.Type
+
+export class BulkResult extends Schema.Class<BulkResult>("BulkResult")({
+  succeeded: Schema.Array(Schema.String),
+  failed: Schema.Array(Schema.Struct({ id: Schema.String, message: Schema.String })),
+}) {}
+
+export class ArchiveDownload extends Schema.Class<ArchiveDownload>("ArchiveDownload")({
+  id: Schema.String,
+  name: Schema.String,
+  status: Schema.Literals(["pending", "building", "uploading", "completed", "failed"]),
+  processed: Schema.Finite,
+  total: Schema.Finite,
+  bytes: Schema.Finite,
+  url: Schema.NullOr(Schema.String),
+  error: Schema.NullOr(Schema.String),
+}) {}
+
 export class Ok extends Schema.Class<Ok>("Ok")({ ok: Schema.Literal(true) }) {}
 
 export class CloudSyncError extends Schema.TaggedError<CloudSyncError>()("CloudSyncError", {
@@ -138,6 +157,26 @@ export const CloudSyncRpcs = RpcGroup.make(
   Rpc.make("catalog.search", {
     payload: { ...SessionPayload, query: Schema.String, limit: Schema.optional(Schema.Finite) },
     success: SearchResponse,
+    error: CloudSyncError,
+  }),
+  Rpc.make("catalog.selectionIds", {
+    payload: {
+      ...SessionPayload,
+      parentId: Schema.NullOr(Schema.String),
+      query: Schema.optional(Schema.String),
+      trashed: Schema.optional(Schema.Boolean),
+    },
+    success: Schema.Array(Schema.String),
+    error: CloudSyncError,
+  }),
+  Rpc.make("catalog.bulk", {
+    payload: {
+      ...SessionPayload,
+      ids: Schema.Array(Schema.String),
+      action: BulkAction,
+      parentId: Schema.optional(Schema.NullOr(Schema.String)),
+    },
+    success: BulkResult,
     error: CloudSyncError,
   }),
   Rpc.make("catalog.retryPreview", {
@@ -202,6 +241,16 @@ export const CloudSyncRpcs = RpcGroup.make(
   Rpc.make("download.file", {
     payload: { ...SessionPayload, id: Schema.String },
     success: DownloadTicket,
+    error: CloudSyncError,
+  }),
+  Rpc.make("download.archive", {
+    payload: { ...SessionPayload, ids: Schema.Array(Schema.String) },
+    success: ArchiveDownload,
+    error: CloudSyncError,
+  }),
+  Rpc.make("download.status", {
+    payload: { ...SessionPayload, id: Schema.String },
+    success: ArchiveDownload,
     error: CloudSyncError,
   }),
 )

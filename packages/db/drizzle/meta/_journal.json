@@ -29,6 +29,13 @@
       "when": 1791115296404,
       "tag": "0003_blushing_rictor",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1791707108290,
+      "tag": "0004_natural_the_professor",
+      "breakpoints": true
     }
   ]
 }

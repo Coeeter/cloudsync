@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto"
 import {
-  naturalCompare,
   nextAvailableName,
   previewKindForMime,
   sanitizeRelativePath,
@@ -19,27 +18,20 @@ import {
   UploadTicket,
   ObjectUploadTicket,
   PreviewManifest,
+  BulkResult,
+  type BulkAction,
 } from "@cloudsync/domain"
 import { and, eq, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm"
 import { Context, Effect, Layer, Schema } from "effect"
 import { CloudConfig } from "../config"
 import { folderCovers } from "./folder-covers"
 import { Storage, type StorageError } from "./storage"
+import { searchPaths, selectionRoots } from "./selection"
 
 type EntryRow = typeof schema.entries.$inferSelect
 type Transaction = Parameters<Parameters<CloudSyncDatabase["transaction"]>[0]>[0]
 type DbLike = CloudSyncDatabase | Transaction
 type CatalogFailure = CloudSyncError | DatabaseError | StorageError
-
-export interface ArchiveEntry {
-  readonly path: string
-  readonly objectKey: string | null
-}
-
-export interface FolderArchive {
-  readonly name: string
-  readonly entries: ReadonlyArray<ArchiveEntry>
-}
 
 export interface CatalogShape {
   readonly list: (
@@ -51,6 +43,16 @@ export interface CatalogShape {
     },
   ) => Effect.Effect<DirectoryListing, CatalogFailure>
   readonly search: (query: string, limit?: number) => Effect.Effect<SearchResponse, CatalogFailure>
+  readonly selectionIds: (
+    parentId: string | null,
+    query?: string,
+    trashed?: boolean,
+  ) => Effect.Effect<ReadonlyArray<string>, CatalogFailure>
+  readonly bulk: (
+    ids: ReadonlyArray<string>,
+    action: BulkAction,
+    parentId?: string | null,
+  ) => Effect.Effect<BulkResult, CatalogFailure>
   readonly retryPreview: (id: string) => Effect.Effect<Ok, CatalogFailure>
   readonly createFolder: (
     parentId: string | null,
@@ -73,7 +75,6 @@ export interface CatalogShape {
   }) => Effect.Effect<UploadTicket, CatalogFailure>
   readonly finalizeUpload: (uploadId: string) => Effect.Effect<Entry, CatalogFailure>
   readonly download: (id: string) => Effect.Effect<DownloadTicket, CatalogFailure>
-  readonly folderArchive: (id: string) => Effect.Effect<FolderArchive, CatalogFailure>
 }
 
 const notFound = (message = "Item not found") => new CloudSyncError({ code: "NOT_FOUND", message })
@@ -432,25 +433,7 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
         if (!value) return SearchResponse.make({ results: [], truncated: false })
         const pageSize = Math.min(Math.max(1, Math.floor(limit)), 200)
         const matches = yield* run("catalog.search", async (db) => {
-          const match = `%${value.replaceAll("%", "\\%").replaceAll("_", "\\_")}%`
-          const result = await db.execute(sql`
-            with recursive catalog_paths as (
-              select id, parent_id, name, name::text as path
-              from entries
-              where parent_id is null and deleted_at is null
-              union all
-              select child.id, child.parent_id, child.name, catalog_paths.path || '/' || child.name
-              from entries child
-              join catalog_paths on child.parent_id = catalog_paths.id
-              where child.deleted_at is null
-            )
-            select id, path
-            from catalog_paths
-            where name ilike ${match} escape '\\' or path ilike ${match} escape '\\'
-            order by path
-            limit ${pageSize + 1}
-          `)
-          const found = Array.from(result as Iterable<{ id: string; path: string }>)
+          const found = await searchPaths(db, value, pageSize + 1)
           const visible = found.slice(0, pageSize)
           const ids = visible.map((row) => row.id)
           if (ids.length === 0) return { rows: [], visible, truncated: false }
@@ -480,6 +463,31 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
           truncated: matches.truncated,
         })
       })
+
+      const selectionIds: CatalogShape["selectionIds"] = (parentId, query, trashed = false) =>
+        run("catalog.selectionIds", async (db) => {
+          if (query?.trim() && !trashed) return (await searchPaths(db, query)).map((row) => row.id)
+          const rows = await db
+            .select({ id: schema.entries.id })
+            .from(schema.entries)
+            .where(
+              trashed && parentId === null
+                ? and(
+                    isNotNull(schema.entries.deletedAt),
+                    eq(schema.entries.id, schema.entries.trashRootId),
+                  )
+                : and(
+                    parentId
+                      ? eq(schema.entries.parentId, parentId)
+                      : isNull(schema.entries.parentId),
+                    trashed
+                      ? isNotNull(schema.entries.deletedAt)
+                      : isNull(schema.entries.deletedAt),
+                  ),
+            )
+            .orderBy(kindRank, naturalName, schema.entries.id)
+          return rows.map((row) => row.id)
+        })
 
       const retryPreview: CatalogShape["retryPreview"] = Effect.fn("Catalog.retryPreview")(
         function* (id) {
@@ -949,66 +957,42 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
         return DownloadTicket.make({ url: signed.url, expiresAt: signed.expiresAt.toISOString() })
       })
 
-      const folderArchive: CatalogShape["folderArchive"] = Effect.fn("Catalog.folderArchive")(
-        function* (id) {
-          return yield* run("catalog.folderArchive", async (db) => {
-            const [root] = await db
-              .select()
-              .from(schema.entries)
-              .where(
-                and(
-                  eq(schema.entries.id, id),
-                  eq(schema.entries.kind, "directory"),
-                  isNull(schema.entries.deletedAt),
-                ),
-              )
-              .limit(1)
-            if (!root) throw notFound("Folder not found")
-
-            const result = await db.execute(sql`
-              with recursive subtree as (
-                select id from entries where id = ${id} and deleted_at is null
-                union all
-                select child.id
-                from entries child
-                join subtree parent on child.parent_id = parent.id
-                where child.deleted_at is null
-              )
-              select id from subtree
-            `)
-            const ids = Array.from(result as Iterable<{ id: string }>, (row) => row.id)
-            const rows = await db
-              .select()
-              .from(schema.entries)
-              .where(inArray(schema.entries.id, ids))
-            const byId = new Map(rows.map((row) => [row.id, row]))
-            const pathFor = (row: EntryRow): string => {
-              const names = [row.name]
-              let parentId = row.parentId
-              while (parentId && parentId !== root.id) {
-                const parent = byId.get(parentId)
-                if (!parent) break
-                names.unshift(parent.name)
-                parentId = parent.parentId
-              }
-              names.unshift(root.name)
-              return names.join("/")
-            }
-
-            return {
-              name: root.name,
-              entries: rows
-                .filter((row) => row.id !== root.id)
-                .map((row) => ({ path: pathFor(row), objectKey: row.objectKey }))
-                .sort((a, b) => naturalCompare(a.path, b.path)),
-            }
-          })
+      const bulk: CatalogShape["bulk"] = Effect.fn("Catalog.bulk")(
+        function* (ids, action, parentId) {
+          if (action === "move" && parentId === undefined)
+            return yield* invalidInput("Choose a destination")
+          const { roots, missing } = yield* run("catalog.bulkRoots", (db) =>
+            selectionRoots(db, ids),
+          )
+          const succeeded: string[] = []
+          const failed = missing.map((id) => ({ id, message: "Item no longer exists" }))
+          for (const root of roots) {
+            const operation: Effect.Effect<unknown, CatalogFailure> =
+              action === "trash"
+                ? trash(root.row.id)
+                : action === "restore"
+                  ? restore(root.row.id)
+                  : action === "delete"
+                    ? deletePermanently(root.row.id)
+                    : move(root.row.id, parentId ?? null)
+            yield* operation.pipe(
+              Effect.tap(() => Effect.sync(() => succeeded.push(...root.covered))),
+              Effect.catch((error) =>
+                Effect.sync(() => {
+                  for (const id of root.covered) failed.push({ id, message: error.message })
+                }),
+              ),
+            )
+          }
+          return BulkResult.make({ succeeded, failed })
         },
       )
 
       return Catalog.of({
         list,
         search,
+        selectionIds,
+        bulk,
         retryPreview,
         createFolder,
         rename,
@@ -1020,7 +1004,6 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
         beginUpload,
         finalizeUpload,
         download,
-        folderArchive,
       })
     }),
   )

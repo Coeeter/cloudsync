@@ -1,4 +1,11 @@
-import type { Breadcrumb, DirectoryListing, Entry } from "@cloudsync/domain"
+import {
+  CloudSyncError,
+  type ArchiveDownload,
+  type BulkAction,
+  type Breadcrumb,
+  type DirectoryListing,
+  type Entry,
+} from "@cloudsync/domain"
 import { Array as Arr, Cause, Effect, Exit, Option, Predicate, Stream } from "effect"
 import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity"
 import { CloudSync, establishSession, logout } from "./rpc"
@@ -22,6 +29,7 @@ export interface UploadProgress {
 
 export const errorAtom = state<string | null>(null)
 export const uploadProgressAtom = state<UploadProgress | null>(null)
+export const archiveDownloadsAtom = state<ReadonlyArray<ArchiveDownload>>([])
 export const dragActiveAtom = state(false)
 export const searchQueryAtom = state("")
 export const debouncedSearchQueryAtom = Atom.debounce(searchQueryAtom, "180 millis")
@@ -299,8 +307,59 @@ export const downloadAtom = CloudSync.runtime.fn(
   { concurrent: true },
 )
 
-export const downloadFolder = (id: string) =>
-  startDownload(`/download/folder/${encodeURIComponent(id)}`)
+export const selectionIdsAtom = CloudSync.runtime.fn(
+  (input: { parentId: string | null; query?: string; trashed?: boolean }) =>
+    CloudSync.use((client) => client("catalog.selectionIds", input)),
+)
+
+export const bulkAtom = catalogFn(
+  (input: { ids: ReadonlyArray<string>; action: BulkAction; parentId?: string | null }, client) =>
+    client("catalog.bulk", input),
+)
+
+const recordArchive = (download: ArchiveDownload) =>
+  registry.update(archiveDownloadsAtom, (previous) => [
+    download,
+    ...previous.filter((item) => item.id !== download.id),
+  ])
+
+export const downloadArchiveAtom = CloudSync.runtime.fn(
+  Effect.fnUntraced(function* (ids: ReadonlyArray<string>) {
+    const client = yield* CloudSync
+    let download = yield* client("download.archive", { ids })
+    while (true) {
+      yield* Effect.sync(() => recordArchive(download))
+      if (download.status === "failed")
+        return yield* new CloudSyncError({
+          code: "INTERNAL",
+          message: download.error ?? "ZIP preparation failed",
+        })
+      if (download.url) {
+        const url = download.url
+        yield* Effect.sync(() => startDownload(url))
+        return download
+      }
+      yield* Effect.sleep("1 second")
+      download = yield* client("download.status", { id: download.id })
+    }
+  }),
+  { concurrent: true },
+)
+
+export const redownloadArchiveAtom = CloudSync.runtime.fn((id: string) =>
+  CloudSync.use((client) =>
+    client("download.status", { id }).pipe(
+      Effect.tap((download) =>
+        Effect.sync(() => {
+          recordArchive(download)
+          if (download.url) startDownload(download.url)
+        }),
+      ),
+    ),
+  ),
+)
+
+export const downloadFolder = (id: string) => void mutate(downloadArchiveAtom, [id])
 
 export type UploadSource = ReadonlyArray<DroppedFile> | DataTransferItemList
 

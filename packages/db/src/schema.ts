@@ -131,3 +131,34 @@ export const rateLimits = pgTable(
   },
   (table) => [primaryKey({ columns: [table.key, table.windowStartedAt] })],
 )
+
+export interface ArchiveManifestEntry {
+  path: string
+  objectKey: string | null
+  size: number
+}
+
+export const archives = pgTable(
+  "archives",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    fingerprint: text("fingerprint").notNull(),
+    name: text("name").notNull(),
+    objectKey: text("object_key").notNull(),
+    manifest: jsonb("manifest").$type<ArchiveManifestEntry[]>().notNull(),
+    status: text("status")
+      .$type<"pending" | "building" | "uploading" | "completed" | "failed">()
+      .notNull()
+      .default("pending"),
+    processed: integer("processed").notNull().default(0),
+    total: integer("total").notNull(),
+    bytes: bigint("bytes", { mode: "number" }).notNull(),
+    error: text("error"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("archives_fingerprint_idx").on(table.fingerprint),
+    index("archives_expiry_idx").on(table.expiresAt),
+  ],
+)

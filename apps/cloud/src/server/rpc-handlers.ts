@@ -3,6 +3,7 @@ import { Effect, Schema } from "effect"
 import type { Headers } from "effect/unstable/http"
 import { Auth } from "./services/auth"
 import { Catalog } from "./services/catalog"
+import { Archives } from "./services/archives"
 
 function asRpcError<E>(effect: Effect.Effect<never, E>): Effect.Effect<never, CloudSyncError> {
   return effect.pipe(
@@ -28,6 +29,7 @@ function cookieHeader(headers: Headers.Headers): string | undefined {
 export const rpcHandlers = Effect.gen(function* () {
   const auth = yield* Auth
   const catalog = yield* Catalog
+  const archives = yield* Archives
 
   const protect = <A, E>(
     sessionToken: string | undefined,
@@ -59,6 +61,10 @@ export const rpcHandlers = Effect.gen(function* () {
       protect(sessionToken, options.headers, catalog.list(parentId, { cursor, limit, trashed })),
     "catalog.search": ({ sessionToken, query, limit }, options) =>
       protect(sessionToken, options.headers, catalog.search(query, limit)),
+    "catalog.selectionIds": ({ sessionToken, parentId, query, trashed }, options) =>
+      protect(sessionToken, options.headers, catalog.selectionIds(parentId, query, trashed)),
+    "catalog.bulk": ({ sessionToken, ids, action, parentId }, options) =>
+      protect(sessionToken, options.headers, catalog.bulk(ids, action, parentId)),
     "catalog.retryPreview": ({ sessionToken, id }, options) =>
       protect(sessionToken, options.headers, catalog.retryPreview(id)),
     "catalog.createFolder": ({ sessionToken, parentId, name }, options) =>
@@ -81,5 +87,9 @@ export const rpcHandlers = Effect.gen(function* () {
       protect(sessionToken, options.headers, catalog.finalizeUpload(uploadId)),
     "download.file": ({ sessionToken, id }, options) =>
       protect(sessionToken, options.headers, catalog.download(id)),
+    "download.archive": ({ sessionToken, ids }, options) =>
+      protect(sessionToken, options.headers, archives.create(ids)),
+    "download.status": ({ sessionToken, id }, options) =>
+      protect(sessionToken, options.headers, archives.status(id)),
   })
 })

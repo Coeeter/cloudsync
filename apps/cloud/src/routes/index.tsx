@@ -1,4 +1,4 @@
-import type { Entry } from "@cloudsync/domain"
+import type { BulkAction, BulkResult, Entry } from "@cloudsync/domain"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -59,6 +59,7 @@ import {
   type DragEvent,
   type FormEvent,
   type PointerEvent,
+  type MouseEvent,
   useEffect,
   useRef,
   useState,
@@ -66,11 +67,16 @@ import {
 import { CheckingScreen, FolderLink, imageSource } from "../client/components"
 import {
   activeEntryIdAtom,
+  archiveDownloadsAtom,
+  bulkAtom,
   createFolderAtom,
   debouncedSearchQueryAtom,
   deletePermanentlyAtom,
   downloadAtom,
   downloadFolder,
+  downloadArchiveAtom,
+  redownloadArchiveAtom,
+  selectionIdsAtom,
   dragActiveAtom,
   errorAtom,
   folderAtom,
@@ -104,6 +110,7 @@ import {
   visit,
 } from "../client/state"
 import { useAtomValue } from "../client/use-atom"
+import { toggleSelection } from "../client/selection"
 
 export const Route = createFileRoute("/")({
   validateSearch: (search: Record<string, unknown>) => ({
@@ -276,6 +283,23 @@ function FileBrowser() {
   const fileInput = useRef<HTMLInputElement>(null)
   const folderInput = useRef<HTMLInputElement>(null)
   const dragDepth = useRef(0)
+  const [selection, setSelection] = useState<{ scope: string; ids: ReadonlySet<string> }>({
+    scope: "",
+    ids: new Set(),
+  })
+  const [selectingAll, setSelectingAll] = useState(false)
+  const [bulkMove, setBulkMove] = useState<ReadonlyArray<string> | null>(null)
+  const [bulkDelete, setBulkDelete] = useState<{
+    ids: ReadonlyArray<string>
+    action: "trash" | "delete"
+  } | null>(null)
+  const anchor = useRef<{ scope: string; id: string } | null>(null)
+  const scope = JSON.stringify([view, folder, query.trim()])
+  const scopeRef = useRef(scope)
+  scopeRef.current = scope
+  const selected = selection.scope === scope ? selection.ids : new Set<string>()
+  const bulkBusy = useAtomValue(bulkAtom).waiting
+  const downloads = useAtomValue(archiveDownloadsAtom)
 
   const upload = (source: UploadSource) => void mutate(uploadAtom, { parentId: folder, source })
 
@@ -324,6 +348,69 @@ function FileBrowser() {
   const hasMore = view === "files" && !searching && current.hasMore
   const loadingMore = hasMore && current.waiting
   const activeEntry = entries.find((entry) => entry.id === activeEntryId) ?? null
+  const canSelect = recycleMode !== "nested"
+  const toggle = (id: string, range: boolean) => {
+    setSelection({
+      scope,
+      ids: toggleSelection(
+        selected,
+        id,
+        entries.map((entry) => entry.id),
+        anchor.current?.scope === scope ? anchor.current.id : null,
+        range,
+      ),
+    })
+    anchor.current = { scope, id }
+  }
+  const clearSelection = () => setSelection({ scope, ids: new Set() })
+  const selectAll = async () => {
+    if (!canSelect || selectingAll) return
+    setSelectingAll(true)
+    try {
+      const result = await mutate(selectionIdsAtom, {
+        parentId: folder,
+        query: searching ? query : undefined,
+        trashed: view === "recycle",
+      })
+      if (Exit.isSuccess(result) && scopeRef.current === scope)
+        setSelection({ scope, ids: new Set(result.value) })
+    } finally {
+      setSelectingAll(false)
+    }
+  }
+  const bulkResult = (result: BulkResult) => {
+    if (scopeRef.current === scope)
+      setSelection({ scope, ids: new Set(result.failed.map((item) => item.id)) })
+    if (result.failed.length)
+      registry.set(
+        errorAtom,
+        `${result.failed.length} item${result.failed.length === 1 ? "" : "s"} failed: ${result.failed[0]?.message}`,
+      )
+  }
+  const runBulk = async (ids: ReadonlyArray<string>, action: BulkAction) => {
+    const result = await mutate(bulkAtom, { ids, action })
+    if (Exit.isSuccess(result)) bulkResult(result.value)
+  }
+  const selectionKeys = useRef({ selectAll, clearSelection })
+  selectionKeys.current = { selectAll, clearSelection }
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (
+        !canSelect ||
+        (event.target instanceof HTMLElement &&
+          event.target.closest(
+            "input, textarea, [contenteditable], [role=dialog], [role=alertdialog]",
+          ))
+      )
+        return
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+        event.preventDefault()
+        void selectionKeys.current.selectAll()
+      } else if (event.key === "Escape") selectionKeys.current.clearSelection()
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [canSelect])
 
   // Re-observing after every page makes the observer fire again while the sentinel is still
   // on screen, so tall viewports keep filling instead of stalling after one page.
@@ -490,6 +577,132 @@ function FileBrowser() {
         </div>
       </header>
 
+      {canSelect && entries.length > 0 ? (
+        <section
+          className="mb-5 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-background/95 px-3 py-2"
+          aria-label="Selection actions"
+        >
+          <span className="mr-auto text-sm text-muted-foreground" aria-live="polite">
+            {selected.size ? `${selected.size} selected` : "Select files and folders"}
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={selectingAll || bulkBusy || searchLoading}
+            onClick={() => void selectAll()}
+          >
+            {selectingAll ? "Selecting…" : "Select all"}
+          </Button>
+          {selected.size > 0 ? (
+            <>
+              <Button variant="ghost" size="sm" disabled={bulkBusy} onClick={clearSelection}>
+                Deselect all
+              </Button>
+              {view === "files" ? (
+                <>
+                  <Button size="sm" onClick={() => void mutate(downloadArchiveAtom, [...selected])}>
+                    <Download size={15} /> Download ZIP
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={bulkBusy}
+                    onClick={() => {
+                      registry.set(moveFolderIdAtom, folder)
+                      setBulkMove([...selected])
+                    }}
+                  >
+                    <Move size={15} /> Move
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={bulkBusy}
+                    onClick={() => setBulkDelete({ ids: [...selected], action: "trash" })}
+                  >
+                    <Trash2 size={15} /> Move to trash
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={bulkBusy}
+                    onClick={() => void runBulk([...selected], "restore")}
+                  >
+                    <RotateCcw size={15} /> Restore
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    disabled={bulkBusy}
+                    onClick={() => setBulkDelete({ ids: [...selected], action: "delete" })}
+                  >
+                    <Trash2 size={15} /> Delete permanently
+                  </Button>
+                </>
+              )}
+            </>
+          ) : null}
+        </section>
+      ) : null}
+
+      {downloads.map((download) => (
+        <div
+          key={download.id}
+          className="mb-4 flex items-center gap-3 rounded-lg border border-border bg-card px-3 py-2.5 text-sm"
+          aria-live="polite"
+        >
+          <FileArchive size={18} className="shrink-0 text-muted-foreground" />
+          <div className="min-w-0 flex-1">
+            <p className="m-0 truncate font-medium">{download.name}</p>
+            <p
+              className={`m-0 text-xs ${download.status === "failed" ? "text-destructive" : "text-muted-foreground"}`}
+            >
+              {download.status === "completed"
+                ? "ZIP ready · download started"
+                : download.status === "failed"
+                  ? download.error
+                  : download.status === "pending"
+                    ? "Waiting to prepare ZIP…"
+                    : download.status === "uploading"
+                      ? "Finishing ZIP upload…"
+                      : `Preparing ZIP · ${download.processed}/${download.total} files`}
+            </p>
+            {download.status === "building" ? (
+              <Progress
+                className="mt-2 h-1"
+                value={download.total ? (download.processed / download.total) * 100 : 0}
+              />
+            ) : null}
+          </div>
+          {download.status === "completed" ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void mutate(redownloadArchiveAtom, download.id)}
+            >
+              Download again
+            </Button>
+          ) : null}
+          {download.status === "completed" || download.status === "failed" ? (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={`Dismiss ${download.name}`}
+              onClick={() =>
+                registry.update(archiveDownloadsAtom, (items) =>
+                  items.filter((item) => item.id !== download.id),
+                )
+              }
+            >
+              <X size={14} />
+            </Button>
+          ) : null}
+        </div>
+      ))}
+
       {(error ?? current.error) ? (
         <div
           className="mb-4 flex items-start justify-between gap-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-sm leading-normal text-destructive"
@@ -544,6 +757,9 @@ function FileBrowser() {
               entry={entry}
               recycle={recycleMode}
               searchPath={searching ? searchPathById.get(entry.id) : undefined}
+              selected={selected.has(entry.id)}
+              selecting={selected.size > 0}
+              onToggle={canSelect ? (range) => toggle(entry.id, range) : undefined}
             />
           ))}
         </section>
@@ -592,6 +808,57 @@ function FileBrowser() {
       <DeleteDialog pending={pendingDelete} />
       <Lightbox entry={activeEntry} entries={entries} />
       <MoveDialog source={moveSource} />
+      <Dialog
+        open={bulkMove !== null}
+        onOpenChange={(open) => {
+          if (!open) setBulkMove(null)
+        }}
+      >
+        <DialogContent className="gap-3">
+          {bulkMove ? (
+            <MovePicker
+              source={null}
+              ids={bulkMove}
+              onBulkResult={bulkResult}
+              close={() => setBulkMove(null)}
+            />
+          ) : null}
+        </DialogContent>
+      </Dialog>
+      <AlertDialog
+        open={bulkDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setBulkDelete(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {bulkDelete?.action === "delete"
+                ? "Delete selected items permanently?"
+                : "Move selected items to trash?"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {bulkDelete?.ids.length ?? 0} selected items and their contents{" "}
+              {bulkDelete?.action === "delete"
+                ? "cannot be recovered after this."
+                : "stay recoverable for 30 days."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                if (bulkDelete) void runBulk(bulkDelete.ids, bulkDelete.action)
+                setBulkDelete(null)
+              }}
+            >
+              {bulkDelete?.action === "delete" ? "Delete permanently" : "Move to trash"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </main>
   )
 }
@@ -600,10 +867,16 @@ function EntryCard({
   entry,
   recycle,
   searchPath,
+  selected = false,
+  selecting = false,
+  onToggle,
 }: {
   entry: Entry
   recycle: "root" | "nested" | null
   searchPath?: string
+  selected?: boolean
+  selecting?: boolean
+  onToggle?: (range: boolean) => void
 }) {
   const [broken, setBroken] = useState(false)
   const fallback =
@@ -623,6 +896,12 @@ function EntryCard({
 
   const cardClass =
     "group block w-full border-0 bg-transparent p-0 text-left text-inherit outline-none"
+  const onCardClick = (event: MouseEvent<HTMLElement>) => {
+    if (onToggle && (selecting || event.metaKey || event.ctrlKey || event.shiftKey)) {
+      event.preventDefault()
+      onToggle(event.shiftKey)
+    } else if (entry.kind === "file") registry.set(activeEntryIdAtom, entry.id)
+  }
   const card = (
     <>
       <div
@@ -693,23 +972,34 @@ function EntryCard({
   )
 
   return (
-    <article className="relative min-w-0">
+    <article
+      className={`group/card relative min-w-0 rounded-lg ${selected ? "ring-2 ring-ring ring-offset-4 ring-offset-background" : ""}`}
+    >
+      {onToggle ? (
+        <input
+          type="checkbox"
+          checked={selected}
+          onClick={(event) => {
+            event.stopPropagation()
+            onToggle(event.shiftKey)
+          }}
+          onChange={() => undefined}
+          aria-label={`Select ${entry.name}`}
+          className={`absolute top-2 left-2 z-10 size-5 cursor-pointer accent-[var(--ring)] ${selecting ? "opacity-100" : "opacity-100 sm:opacity-0 sm:group-hover/card:opacity-100 sm:focus-visible:opacity-100"}`}
+        />
+      ) : null}
       {entry.kind === "directory" ? (
         <FolderLink
           folder={entry.id}
           recycle={recycle !== null}
           className={cardClass}
           title={entry.name}
+          onClick={onCardClick}
         >
           {card}
         </FolderLink>
       ) : (
-        <button
-          type="button"
-          className={cardClass}
-          onClick={() => registry.set(activeEntryIdAtom, entry.id)}
-          title={entry.name}
-        >
+        <button type="button" className={cardClass} onClick={onCardClick} title={entry.name}>
           {card}
         </button>
       )}
@@ -1140,20 +1430,36 @@ function MoveDialog({ source }: { source: Entry | null }) {
   )
 }
 
-function MovePicker({ source, close }: { source: Entry; close: () => void }) {
+function MovePicker({
+  source,
+  close,
+  ids,
+  onBulkResult,
+}: {
+  source: Entry | null
+  close: () => void
+  ids?: ReadonlyArray<string>
+  onBulkResult?: (result: BulkResult) => void
+}) {
   const folderId = useAtomValue(moveFolderIdAtom)
   const result = useAtomValue(moveFolderAtom(folderId))
-  const busy = useAtomValue(moveAtom).waiting
+  const singleBusy = useAtomValue(moveAtom).waiting
+  const bulkBusy = useAtomValue(bulkAtom).waiting
+  const busy = ids ? bulkBusy : singleBusy
   const listing = AsyncResult.getOrElse(result, () => null)
   const folders =
-    listing?.entries.filter((entry) => entry.kind === "directory" && entry.id !== source.id) ?? []
-  const unchanged = folderId === source.parentId
+    listing?.entries.filter(
+      (entry) => entry.kind === "directory" && entry.id !== source?.id && !ids?.includes(entry.id),
+    ) ?? []
+  const unchanged = source !== null && folderId === source.parentId
   const browse = (id: string | null) => registry.set(moveFolderIdAtom, id)
 
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Move “{source.name}”</DialogTitle>
+        <DialogTitle>
+          {source ? `Move “${source.name}”` : `Move ${ids?.length ?? 0} selected items`}
+        </DialogTitle>
         <DialogDescription>Open the destination folder, then choose Move here.</DialogDescription>
       </DialogHeader>
       <nav
@@ -1188,11 +1494,19 @@ function MovePicker({ source, close }: { source: Entry; close: () => void }) {
         </Button>
         <Button
           disabled={busy || unchanged || !listing}
-          onClick={() =>
-            void mutate(moveAtom, { id: source.id, parentId: folderId }).then((exit) => {
-              if (Exit.isSuccess(exit)) close()
-            })
-          }
+          onClick={() => {
+            if (ids)
+              void mutate(bulkAtom, { ids, action: "move", parentId: folderId }).then((exit) => {
+                if (Exit.isSuccess(exit)) {
+                  onBulkResult?.(exit.value)
+                  close()
+                }
+              })
+            else if (source)
+              void mutate(moveAtom, { id: source.id, parentId: folderId }).then((exit) => {
+                if (Exit.isSuccess(exit)) close()
+              })
+          }}
         >
           Move to {listing?.directory?.name ?? "CloudSync"}
         </Button>

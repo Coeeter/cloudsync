@@ -1,4 +1,5 @@
 import { Readable } from "node:stream"
+import { Upload } from "@aws-sdk/lib-storage"
 import {
   DeleteObjectCommand,
   HeadObjectCommand,
@@ -44,6 +45,11 @@ export interface StorageShape {
   readonly put: (
     objectKey: string,
     body: Uint8Array,
+    contentType: string,
+  ) => Effect.Effect<void, StorageError>
+  readonly putStream: (
+    objectKey: string,
+    body: Readable,
     contentType: string,
   ) => Effect.Effect<void, StorageError>
   readonly delete: (objectKey: string) => Effect.Effect<void, StorageError>
@@ -284,6 +290,34 @@ export class Storage extends Context.Service<Storage, StorageShape>()("@cloudsyn
         head,
         get,
         put,
+        putStream: (objectKey, body, contentType) =>
+          Effect.tryPromise({
+            try: async (signal) => {
+              const upload = new Upload({
+                client,
+                params: {
+                  Bucket: config.s3Bucket,
+                  Key: objectKey,
+                  Body: body,
+                  ContentType: contentType,
+                },
+                queueSize: 2,
+                partSize: 8 * 1024 * 1024,
+                leavePartsOnError: false,
+              })
+              const abort = () => {
+                body.destroy()
+                void upload.abort().catch(() => undefined)
+              }
+              signal.addEventListener("abort", abort, { once: true })
+              try {
+                await upload.done()
+              } finally {
+                signal.removeEventListener("abort", abort)
+              }
+            },
+            catch: storageError("putStream"),
+          }),
         delete: remove,
         viewUrl,
         downloadUrl,
