@@ -1,30 +1,27 @@
 # Owner-paused cutover and recovery
 
-Prepared only. Nothing here authorizes a deployment, import, schedule, DNS change, production write or deletion.
+Stopped by Nas on 2026-10-12. Nothing here authorizes a deployment, import, schedule, DNS change, production write or deletion; each needs a fresh instruction.
 
 ## Preparation gates
 
-- Protect GitHub dev/prod and aws-dev/prod-apply environments with owner review. CI never deploys Dokploy. Configure scoped Cloudflare API/Doppler tokens, AWS OIDC roles and separate dev/prod state keys.
-- Create D1 databases with Wrangler after authorization, replace the explicit database-ID placeholders in wrangler.jsonc, and configure the app's custom hostname. Preserve the existing .example.com viewer-cookie scope.
-- Terraform ZIP root references the existing Singapore S3 bucket and CloudFront distribution as data sources. Plan/apply new ZIP resources separately from any content-delivery adoption. Review existing bucket policies, CORS and signing identities; no original object copy or remote setting change is part of local implementation.
-- Populate ZIP_SERVICE_SECRET in Doppler. Worker secrets flow directly to Wrangler; the same ZIP secret flows to a standard SSM SecureString outside Terraform state. Keep SESSION_SECRET and CloudFront signing key unchanged so sessions and private delivery survive.
-- Build via CI, deploy AWS ZIPs from that immutable CI artifact, place the returned ZIP_SERVICE_URL in Doppler, then release the Worker. Initial Worker release may omit the ZIP endpoint while AWS is prepared. Deployment workflows are manual; apply uses a protected second job with the saved plan.
-- Prove real dev authentication/email, presigned checksum PUT/HEAD, private CDN views/range/download/CORS, asynchronous Lambda/API Gateway/IAM, callback replay and failure recovery. S3Mock and local Lambda emulation do not prove AWS permissions or signatures.
-- Validate D1 backups/Time Travel and exported snapshots. Before enabling schedules, review cleanup and add an incomplete-multipart lifecycle rule without replacing existing original-byte retention. Add failure-queue monitoring. Environment cron arrays remain empty until separately authorized.
-- Rehearse at the current catalog scale. The source audit must explain every anomaly and operational row; do not use --accept-review for production without an explicit recorded disposition.
+- Complete the one-time setup in [releases](releases.md) and let a `main` push deploy. The prod D1 ID is already in `wrangler.jsonc`, and that database is empty. The first deploy applies the schema.
+- Keep SESSION_SECRET and the CloudFront signing key unchanged, so desktop sessions and private delivery survive. Keep the `.example.com` viewer-cookie scope.
+- The bucket already has an abort-incomplete-multipart (7 days) and noncurrent-version (30 days) lifecycle rule. Do not replace it. Review scoped expiry for `downloads/` and `system/` separately.
+- Prove real auth/email, presigned checksum PUT/HEAD, private CDN views/range/download/CORS, API Gateway → async Lambda → callback, and failure recovery once the domain points at the Worker. S3Mock and local Lambda emulation do not prove AWS permissions or signatures.
+- Rehearse at current catalog scale. The source audit must explain every anomaly; do not use `--accept-review` for production without a recorded disposition.
 
 ## Paused migration
 
-1. Nas quits/pauses the desktop uploader and closes browser uploads. Let active requests and jobs finish. Record unfinished work and multipart uploads; stop both Dokploy web and worker. Keep PostgreSQL read-only and keep the pinned old image and original settings for recovery.
-2. Take a restorable PostgreSQL backup and export with `MIGRATION_SOURCE_URL=... bun apps/cloud/scripts/migration/export.ts <new-empty-directory>`. The export is one read-only repeatable-read snapshot; timestamp microseconds, bigint text and every original SQL table remain in checksummed JSONL. Never print the connection URL.
-3. Run audit.ts, import.ts into a new local .sqlite, and reconcile.ts. An interrupted import resumes by table checkpoint. Inspect the independent per-field reconciliation and operational dispositions. Original/preview keys and bytes remain unchanged; historical jobs/rate-limit rows remain in legacy tables. Interrupted archives are visible failures, and completed archive outputs retain their existing keys.
-4. Produce SQL with sql.ts, then import into a newly created empty D1 database with Wrangler `d1 execute --remote --file`. Parent-before-child rows precede runtime triggers; migration tracking prevents the release workflow from reapplying the schema. Do not import into a nonempty or live database. Retain source/local import/SQL/checksums, and perform independent destination reconciliation before cutover.
-5. Publish only generated ZIP manifests with manifests.ts after separate authorization; this does not copy originals. Check original and preview objects with bounded real HEADs and compare lengths/checksums. Missing objects or unexplained record differences stop cutover. Validate completed archives whose historical manifest references remain visible; ambiguous/missing historical path mappings must be reviewed.
-6. Deploy AWS/Worker resources with maintenance disabled. Rehearse read-only catalog/auth/private downloads while the uploader stays paused. Nas authorizes endpoint/custom-domain switching separately. Keep old Dokploy services stopped so cached DNS cannot produce split-brain writes.
-7. Only after owner review, authorize the production maintenance schedule and resume ingestion. Verify one real desktop upload/finalization/local-source removal and one browser upload/preview before continuing the full inbox.
+1. Nas pauses the desktop uploader and closes browser uploads. Let active work finish, record unfinished uploads, and stop both Dokploy web and worker. Keep PostgreSQL read-only, and keep the old image and settings for recovery.
+2. Take a restorable PostgreSQL backup and export with `MIGRATION_SOURCE_URL=... bun apps/cloud/scripts/migration/export.ts <new-empty-directory>`. The export is one repeatable-read snapshot in checksummed JSONL. Never print the connection URL.
+3. Run `audit.ts`, `import.ts` into a new local `.sqlite`, and `reconcile.ts`. An interrupted import resumes by table checkpoint. Original and preview keys and bytes never change.
+4. Run `sql.ts <local.sqlite> <import.sql>` to produce a data-only file for the already-migrated prod D1. Apply it with `wrangler d1 execute cloudsync-prod --remote --env prod --file <import.sql>`. Its first statement aborts if `entries` is non-empty. It drops the live-parent insert trigger while loading (trashed children of trashed folders would fail it), then recreates it and runs `PRAGMA foreign_key_check`. Then export the D1 database and reconcile it independently before switching.
+5. Publish only generated ZIP manifests with `manifests.ts`; this does not copy originals. Check originals and previews with bounded real HEADs. Missing objects or unexplained differences stop the cutover.
+6. Switch the domain: add `"routes": [{"pattern": "sync.example.com", "custom_domain": true}]` to `env.prod` and deploy. The existing DNS record for the VPS must be removed first, and the API token needs zone Workers Routes edit. Keep the old Dokploy services stopped so cached DNS cannot cause split-brain writes. The ZIP callback URL already targets this hostname.
+7. After owner review, set the prod cron to `*/5 * * * *` and resume ingestion. Verify one real desktop upload/finalization/local-source removal and one browser upload/preview before continuing the full inbox.
 
 ## Recovery
 
-Before new writes, disable the new runtime and restore the old endpoint/image against the unchanged PostgreSQL snapshot if needed. Once D1 accepts writes, it is authoritative: forward-fix or restore a rehearsed D1 backup and reconcile all later uploaded objects/metadata before reopening writes. Do not switch back to stale PostgreSQL. Keep old database/export/image until Nas explicitly authorizes retirement.
+Before new writes: remove the custom domain, restore the old DNS record, and restart Dokploy against the unchanged PostgreSQL. Once D1 accepts writes, it is authoritative: forward-fix, or restore D1 Time Travel, and reconcile later objects and metadata. Do not switch back to stale PostgreSQL. Keep the old database, export and image until Nas authorizes retirement.
 
-Code rollback uses the previous Wrangler deployment and previous Lambda artifact. It does not reverse data migrations. Inspect schema compatibility first. Secrets and S3 originals are never part of a code rollback.
+Code rollback is `wrangler rollback` for the Worker, or reverting the commit, which redeploys the Lambda. Neither reverses data migrations.

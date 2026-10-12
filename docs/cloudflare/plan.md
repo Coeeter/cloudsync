@@ -42,3 +42,19 @@ Status: Partial overall; local implementation and reachable validation complete.
 Authorized cloud setup/deployment is required to replace D1 ID placeholders, configure protected GitHub environments/scoped tokens/OIDC roles/state and artifact buckets, review saved Terraform plans and deploy. Then validate actual Cloudflare D1 quotas/runtime, Resend delivery, S3/CloudFront signatures/CORS/range requests, AWS API Gateway/IAM/async Lambda/callback recovery and ordinary Lambda resource limits through deployed artifacts. Local emulation does not prove these boundaries. Existing delivery adoption remains separate and unapplied.
 
 Use [release setup](releases.md) and [paused cutover](cutover.md) for the next stage. Production anomaly dispositions and destination reconciliation must precede endpoint switching; production cleanup schedules require separate authorization.
+
+## Cutover stopped (2026-10-12)
+
+Nas authorized the push, deployment, migration, domain switch and Dokploy removal, then stopped everything. Done before the stop: b33bb00 was pushed, CI run 38248973048 passed, and empty D1 databases `cloudsync-prod` and `cloudsync-dev` were created. The desktop app was quit, and a fresh signed arm64 bundle was built but not installed. No Worker, Lambda, IAM role, OIDC provider, state bucket, DNS change, data export/import or Dokploy stop exists. Production still runs on Dokploy. `cloudsync-dev` is unused now that only prod is deployed. It is empty and can be deleted.
+
+The follow-up review replaced the three manual workflows with one push-to-main pipeline ([releases](releases.md)) and fixed defects that would have failed the first real deploy or cutover:
+
+- `reserved_concurrent_executions = 1` cannot apply: the account limit is 10, and AWS requires 10 unreserved.
+- `wrangler d1` ignores the Vite redirected config and needs `--env prod`.
+- The import SQL recreated the schema, so it would fail on a D1 database that the pipeline had already migrated. It is now data-only, with an emptiness guard.
+- Maintenance recovered lost ZIP callbacks by HTTP-posting to `PUBLIC_URL`, which is the old Dokploy host before cutover. It now applies them directly.
+- Archive creation failed whenever any unrelated catalog write landed during the manifest upload.
+- The builder kept streaming after it lost its lease.
+- `/health` did not touch configuration or D1.
+
+Resuming requires the one-time setup in releases.md and then the [cutover](cutover.md) steps, each with fresh authorization.

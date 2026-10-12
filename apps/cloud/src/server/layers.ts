@@ -87,7 +87,19 @@ const LogoutRoute = HttpRouter.add(
   }).pipe(Effect.orDie),
 )
 
-const HealthRoute = HttpRouter.add("GET", "/health", HttpServerResponse.jsonUnsafe({ ok: true }))
+// Deployment checks call this. Invalid configuration already fails the layer; this also proves
+// the D1 binding reaches the migrated schema.
+const HealthRoute = HttpRouter.add(
+  "GET",
+  "/health",
+  Effect.gen(function* () {
+    const database = yield* Database
+    yield* database.execute("health", (db) => db.revision())
+    return HttpServerResponse.jsonUnsafe({ ok: true })
+  }).pipe(
+    Effect.orElseSucceed(() => HttpServerResponse.jsonUnsafe({ ok: false }, { status: 503 })),
+  ),
+)
 
 export const RoutesLive = Layer.mergeAll(
   RpcRoutes,

@@ -1,13 +1,11 @@
 # AWS ownership
 
-`zip/` owns only new ZIP resources. It references existing S3/CloudFront with data sources and never changes their configuration. Cloudflare owns the app hostname; API Gateway exposes POST /zip/{id} to the Worker. CloudFront remains file delivery, and CloudFormation is not needed.
+`bootstrap/` is applied once by the owner with admin credentials. It creates the state bucket, the GitHub OIDC provider and the `cloudsync-github-deploy` role, which only `main` can assume. Its state is local and gitignored.
 
-`adoption/delivery/` preserves the earlier prepared adoption module as a separate, unapplied starting point. Refresh live inventory and prove a zero-change import plan in isolated local state before adopting it. Never combine content adoption with ZIP creation or apply stale snapshots. No state import, apply, DNS update, or remote bucket mutation has been authorized.
+`zip/` owns only the new ZIP resources: two Lambdas sharing one `zip.mjs`, API Gateway `POST /zip/{id}`, roles, logs, a failure queue and the SSM secret. CI applies it on every push to `main`. It refers to the existing content bucket by name and never changes the bucket's configuration. The Lambda code is zipped from `apps/cloud/dist-lambda/zip.mjs`, so run `bun run --cwd apps/cloud build:lambda` before any local plan.
 
-Use separate state keys for dev/prod ZIPs and content adoption. Bootstrap a private versioned state/artifact bucket separately; use the S3 backend with `use_lockfile=true`. CI uses environment-scoped AWS OIDC roles; role creation and protected GitHub environments require owner setup. Artifact bucket/key/hash refer to one immutable zip.mjs package built by CI. Promote that same artifact to prod.
+`ZIP_SERVICE_SECRET` comes from Doppler and is written to a write-only SSM parameter, so it never enters state. Its version is derived from the value, so a rotation reaches Lambda on the next deploy. The Worker gets the same Doppler value.
 
-Set the ZIP secret outside Terraform: a standard SSM SecureString at the configured `secret_parameter`, using the same Doppler ZIP_SERVICE_SECRET as Wrangler. No Terraform secret resource/data source is used. The Lambda role reads its one parameter; the default aws/ssm key is sufficient. IAM privileges for Workers' existing S3 credentials must cover original/preview uploads and HEADs, system/zip-requests writes, zip-outcome reads, and deletion cleanup. Restrict to the environment's bucket; never rotate existing production credentials during this migration.
+No reserved concurrency: the account limit is 10, and AWS rejects any reservation that leaves fewer than 10 unreserved. Leases make duplicate builders harmless. Exhausted async failures land in `cloudsync-zip-failures`, and nothing alarms on it yet.
 
-All AWS ZIP bytes remain in Singapore. One builder runs at a time; asynchronous invocation buffers submissions. Capture exhausted async failures in the queue and monitor it. Configure an alarm separately before production. D1 reconciliation recovers lost callbacks and marks expired leases failed; requests can be prepared again.
-
-Do not add a new lifecycle configuration over the existing bucket's rules. Separately review adding scoped temporary ZIP/manifest/outcome expiry and incomplete multipart cleanup; originals must remain untouched. These are cutover gates, not an authorized apply.
+`adoption/delivery/` is an earlier, unapplied adoption sketch for the existing S3/CloudFront resources. Refresh the live inventory and prove a zero-change import plan in isolated state before using it. Never combine it with the ZIP root.

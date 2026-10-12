@@ -1,23 +1,42 @@
 terraform {
-  required_version = ">= 1.10.0, < 2.0.0"
+  required_version = ">= 1.11.0, < 2.0.0"
   required_providers {
-    aws = { source = "hashicorp/aws", version = "~> 6.0" }
+    aws     = { source = "hashicorp/aws", version = "~> 6.0" }
+    archive = { source = "hashicorp/archive", version = "~> 2.7" }
   }
-  backend "s3" {}
+  backend "s3" {
+    bucket       = "cloudsync-terraform-123456789012"
+    key          = "zip.tfstate"
+    region       = "ap-southeast-1"
+    use_lockfile = true
+  }
 }
 provider "aws" { region = "ap-southeast-1" }
-variable "environment" { type = string }
 variable "bucket_name" { type = string }
-variable "cloudfront_distribution_id" { type = string }
 variable "callback_url" { type = string }
-variable "artifact_bucket" { type = string }
-variable "artifact_key" { type = string }
-variable "artifact_sha256" { type = string }
-variable "secret_parameter" { type = string }
-data "aws_s3_bucket" "content" { bucket = var.bucket_name }
-data "aws_cloudfront_distribution" "files" { id = var.cloudfront_distribution_id }
+variable "zip_service_secret" {
+  type      = string
+  sensitive = true
+}
 data "aws_caller_identity" "current" {}
-locals { name = "cloudsync-${var.environment}-zip" }
+locals {
+  name    = "cloudsync-zip"
+  bucket  = "arn:aws:s3:::${var.bucket_name}"
+  account = data.aws_caller_identity.current.account_id
+}
+data "archive_file" "code" {
+  type        = "zip"
+  source_file = "${path.module}/../../../apps/cloud/dist-lambda/zip.mjs"
+  output_path = "${path.module}/.terraform/zip.zip"
+}
+# Write-only keeps the secret out of state. The version is a hash so a Doppler rotation
+# reaches Lambda on the next deploy instead of silently diverging from the Worker's copy.
+resource "aws_ssm_parameter" "secret" {
+  name             = "/cloudsync/zip-service-secret"
+  type             = "SecureString"
+  value_wo         = var.zip_service_secret
+  value_wo_version = parseint(substr(sha256(var.zip_service_secret), 0, 8), 16)
+}
 data "aws_iam_policy_document" "assume" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -43,15 +62,15 @@ resource "aws_iam_role_policy" "function" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = concat([
-      { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = "arn:aws:ssm:ap-southeast-1:${data.aws_caller_identity.current.account_id}:parameter${var.secret_parameter}" },
+      { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = aws_ssm_parameter.secret.arn },
       { Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = "${aws_cloudwatch_log_group.function[each.key].arn}:*" }
-      ], [for statement in [
-        { Effect = "Allow", Action = ["lambda:InvokeFunction"], Resource = ["arn:aws:lambda:ap-southeast-1:${data.aws_caller_identity.current.account_id}:function:${local.name}-build"] }
-        ] : statement if each.key == "submit"], [for statement in [
-        { Effect = "Allow", Action = ["s3:GetObject"], Resource = ["${data.aws_s3_bucket.content.arn}/objects/*", "${data.aws_s3_bucket.content.arn}/system/zip-requests/*"] },
-        { Effect = "Allow", Action = ["s3:PutObject", "s3:AbortMultipartUpload"], Resource = ["${data.aws_s3_bucket.content.arn}/downloads/*", "${data.aws_s3_bucket.content.arn}/system/zip-outcomes/*"] },
-        { Effect = "Allow", Action = ["sqs:SendMessage"], Resource = [aws_sqs_queue.failures.arn] }
-    ] : statement if each.key == "build"])
+      ], each.key == "submit" ? [
+      { Effect = "Allow", Action = ["lambda:InvokeFunction"], Resource = ["arn:aws:lambda:ap-southeast-1:${local.account}:function:${local.name}-build"] }
+      ] : [
+      { Effect = "Allow", Action = ["s3:GetObject"], Resource = ["${local.bucket}/objects/*", "${local.bucket}/system/zip-requests/*"] },
+      { Effect = "Allow", Action = ["s3:PutObject", "s3:AbortMultipartUpload"], Resource = ["${local.bucket}/downloads/*", "${local.bucket}/system/zip-outcomes/*"] },
+      { Effect = "Allow", Action = ["sqs:SendMessage"], Resource = [aws_sqs_queue.failures.arn] }
+    ])
   })
 }
 resource "aws_sqs_queue" "failures" {
@@ -59,21 +78,20 @@ resource "aws_sqs_queue" "failures" {
   message_retention_seconds = 1209600
   sqs_managed_sse_enabled   = true
 }
+# No reserved concurrency: this account's limit is 10 and AWS refuses any reservation that
+# leaves fewer than 10 unreserved. Leases already make duplicate builders harmless.
 resource "aws_lambda_function" "build" {
-  function_name                  = "${local.name}-build"
-  role                           = aws_iam_role.function["build"].arn
-  runtime                        = "nodejs22.x"
-  architectures                  = ["arm64"]
-  handler                        = "zip.handler"
-  s3_bucket                      = var.artifact_bucket
-  s3_key                         = var.artifact_key
-  source_code_hash               = var.artifact_sha256
-  memory_size                    = 2048
-  timeout                        = 900
-  reserved_concurrent_executions = 1
-  publish                        = true
+  function_name    = "${local.name}-build"
+  role             = aws_iam_role.function["build"].arn
+  runtime          = "nodejs22.x"
+  architectures    = ["arm64"]
+  handler          = "zip.handler"
+  filename         = data.archive_file.code.output_path
+  source_code_hash = data.archive_file.code.output_base64sha256
+  memory_size      = 2048
+  timeout          = 900
   environment {
-    variables = { S3_BUCKET = var.bucket_name, ZIP_SECRET_PARAMETER = var.secret_parameter, CALLBACK_URL = var.callback_url }
+    variables = { S3_BUCKET = var.bucket_name, ZIP_SECRET_PARAMETER = aws_ssm_parameter.secret.name, CALLBACK_URL = var.callback_url }
   }
   depends_on = [aws_cloudwatch_log_group.function, aws_iam_role_policy.function]
 }
@@ -91,14 +109,12 @@ resource "aws_lambda_function" "submit" {
   runtime          = "nodejs22.x"
   architectures    = ["arm64"]
   handler          = "zip.handler"
-  s3_bucket        = var.artifact_bucket
-  s3_key           = var.artifact_key
-  source_code_hash = var.artifact_sha256
+  filename         = data.archive_file.code.output_path
+  source_code_hash = data.archive_file.code.output_base64sha256
   memory_size      = 256
   timeout          = 25
-  publish          = true
   environment {
-    variables = { ZIP_SECRET_PARAMETER = var.secret_parameter, ZIP_BUILDER_FUNCTION_NAME = aws_lambda_function.build.function_name }
+    variables = { ZIP_SECRET_PARAMETER = aws_ssm_parameter.secret.name, ZIP_BUILDER_FUNCTION_NAME = aws_lambda_function.build.function_name }
   }
   depends_on = [aws_cloudwatch_log_group.function, aws_iam_role_policy.function]
 }
@@ -134,4 +150,3 @@ resource "aws_lambda_permission" "http" {
   source_arn    = "${aws_apigatewayv2_api.zip.execution_arn}/*/POST/zip/*"
 }
 output "zip_service_url" { value = aws_apigatewayv2_stage.zip.invoke_url }
-output "existing_files_url" { value = data.aws_cloudfront_distribution.files.domain_name }

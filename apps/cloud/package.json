@@ -4,12 +4,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev --port 3310 --strictPort",
-    "build": "vite build && bun build src/lambda/zip.ts --target=node --format=esm --outdir=dist-lambda --entry-naming=zip.mjs",
+    "build": "vite build && bun run build:lambda",
+    "build:lambda": "bun build src/lambda/zip.ts --target=node --format=esm --outdir=dist-lambda --entry-naming=zip.mjs",
     "check": "tsr generate && tsc -p tsconfig.json --noEmit",
     "test": "bun test src",
     "db:local": "wrangler d1 migrations apply cloudsync --local",
     "preview": "wrangler dev --port 3310",
-    "deploy": "wrangler deploy",
     "local:zip": "sh -c '. scripts/local/env.sh && bun scripts/local/zip-server.ts'",
     "test:e2e": "sh -c '. scripts/local/env.sh && bun test src/server/catalog.e2e.test.ts'"
   },

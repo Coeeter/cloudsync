@@ -223,7 +223,8 @@ export async function buildZip(
       }
       processed++
       if (Date.now() - reportedAt > 2000) {
-        await callback(input, "progress", { leaseToken: token, processed })
+        if (!(await callback(input, "progress", { leaseToken: token, processed })))
+          throw new Error("ZIP lease was lost")
         reportedAt = Date.now()
       }
     }

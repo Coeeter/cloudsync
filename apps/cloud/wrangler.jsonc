@@ -9,17 +9,13 @@
   "triggers": {"crons": ["*/5 * * * *"]},
   "observability": {"enabled": true},
   "env": {
-    "dev": {
-      "name": "cloudsync-dev",
-      "triggers": {"crons": []},
-      "vars": {"NODE_ENV":"production"},
-      "d1_databases": [{"binding":"DB","database_name":"cloudsync-dev","database_id":"REPLACE_AFTER_AUTHORIZED_CREATION","migrations_dir":"../../packages/db/migrations"}]
-    },
     "prod": {
       "name": "cloudsync",
+      "account_id": "00000000000000000000000000000000",
+      // Maintenance purges expired trash and deletes S3 objects; enable only after cutover.
       "triggers": {"crons": []},
       "vars": {"NODE_ENV":"production"},
-      "d1_databases": [{"binding":"DB","database_name":"cloudsync-prod","database_id":"REPLACE_AFTER_AUTHORIZED_CREATION","migrations_dir":"../../packages/db/migrations"}]
+      "d1_databases": [{"binding":"DB","database_name":"cloudsync-prod","database_id":"c6936271-9153-4d71-b636-c37f3a135ee6","migrations_dir":"../../packages/db/migrations"}]
     }
   }
 }

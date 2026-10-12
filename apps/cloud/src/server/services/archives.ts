@@ -193,8 +193,10 @@ export class Archives extends Context.Service<Archives, ArchivesShape>()(
               JSON.stringify(manifest.memberIds.slice(page * 500, page * 500 + 500)),
             ],
           )
+          // The manifest was already checked against one catalog revision. Guarding this insert
+          // with it too would fail the request whenever an unrelated upload lands meanwhile.
           yield* run("archive.create", (db) =>
-            db.commit(manifest.revision, [
+            db.batch([
               [
                 "INSERT INTO archives(id,fingerprint,name,objectKey,manifest,selection,total,bytes,expiresAt,createdAt) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 id,

@@ -1,0 +1,128 @@
+name: CI and Deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancelling a deploy mid-apply would leave the Terraform state lock held.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [check, lint, test]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bun run ${{ matrix.task }}
+
+  zip:
+    if: github.ref == 'refs/heads/main'
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      url: ${{ steps.apply.outputs.url }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: dopplerhq/cli-action@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.16.5
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/cloudsync-github-deploy
+          aws-region: ap-southeast-1
+      - run: bun install --frozen-lockfile
+      - run: bun run --cwd apps/cloud build:lambda
+
+      # Read single values rather than `doppler run`, which would also inject the Worker's
+      # AWS app keys and override the deploy role's credentials.
+      - name: Read ZIP configuration
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+        run: |
+          secret="$(doppler secrets get ZIP_SERVICE_SECRET --plain)"
+          echo "::add-mask::$secret"
+          {
+            echo "TF_VAR_zip_service_secret=$secret"
+            echo "TF_VAR_bucket_name=$(doppler secrets get S3_BUCKET --plain)"
+            echo "TF_VAR_callback_url=$(doppler secrets get PUBLIC_URL --plain)/internal/zip"
+          } >> "$GITHUB_ENV"
+
+      - name: Apply ZIP infrastructure
+        id: apply
+        working-directory: infra/terraform/zip
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -input=false
+          echo "url=$(terraform output -raw zip_service_url)" >> "$GITHUB_OUTPUT"
+
+  worker:
+    if: github.ref == 'refs/heads/main'
+    needs: [checks, zip]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/cloud
+    env:
+      CLOUDFLARE_ENV: prod
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: dopplerhq/cli-action@v4
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+
+      # Additive schema changes only; the one-time PostgreSQL data import is a separate step.
+      # Unlike deploy, d1 commands ignore the build's redirected config and need --env.
+      - name: Apply D1 migrations
+        run: bunx wrangler d1 migrations apply cloudsync-prod --remote --env prod
+
+      - name: Deploy Worker
+        env:
+          ZIP_SERVICE_URL: ${{ needs.zip.outputs.url }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler.ndjson
+        run: |
+          secrets="$RUNNER_TEMP/worker-secrets.json"
+          trap 'rm -f "$secrets"' EXIT
+          doppler run -- bun scripts/release/secrets.ts > "$secrets"
+          bunx wrangler deploy --secrets-file "$secrets" --var "ZIP_SERVICE_URL:$ZIP_SERVICE_URL"
+
+      - name: Check deployed Worker
+        run: |
+          urls="$(jq -r 'select(.type == "deploy") | .targets[]?' "$RUNNER_TEMP/wrangler.ndjson")"
+          test -n "$urls"
+          for url in $urls; do
+            curl --fail --silent --show-error --retry 5 --retry-all-errors --max-time 20 "$url/health"
+            echo
+          done

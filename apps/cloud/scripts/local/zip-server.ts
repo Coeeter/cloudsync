@@ -18,7 +18,7 @@ const invocation = Bun.serve({
           if (result.errorMessage) throw new Error(result.errorMessage)
         } else await buildZip(event, { getRemainingTimeInMillis: () => 900_000 })
       })
-      .catch(() => console.error("Local ZIP invocation failed"))
+      .catch((error) => console.error("Local ZIP invocation failed:", error))
       .finally(() => tasks.delete(task))
     chain = task
     tasks.add(task)

@@ -1,17 +1,15 @@
 import { Database } from "@cloudsync/db"
-import { Effect, Redacted } from "effect"
+import { Effect } from "effect"
 import { uploadedPreviewKeys } from "@cloudsync/core"
-import { CloudConfig } from "./config"
 import { CatalogStore, now, retry } from "./persistence/catalog"
 import { Archives, type ArchiveRow } from "./services/archives"
 import { Storage } from "./services/storage"
-import { signedHeaders } from "../shared/zip-protocol"
+import { applyZipCallback, type ZipCallback } from "./zip-callback"
 
 export const maintenance = Effect.gen(function* () {
   const database = yield* Database
   const storage = yield* Storage
   const archives = yield* Archives
-  const config = yield* CloudConfig
   const pending = yield* database.execute("maintenance.archives", (db) =>
     db.all<ArchiveRow>(
       "SELECT * FROM archives WHERE (status='pending' OR (status IN ('building','uploading') AND leaseUntil<?)) AND expiresAt>? ORDER BY createdAt LIMIT 20",
@@ -25,16 +23,10 @@ export const maintenance = Effect.gen(function* () {
         .readJson(`system/zip-outcomes/${row.id}/${row.leaseToken}.json`)
         .pipe(Effect.orElseSucceed(() => null))
       if (outcome) {
-        const body = JSON.stringify(outcome)
-        const response = yield* Effect.promise(() =>
-          fetch(`${config.publicUrl}/internal/zip`, {
-            method: "POST",
-            headers: signedHeaders(Redacted.value(config.zipServiceSecret), body),
-            body,
-            signal: AbortSignal.timeout(20_000),
-          }),
+        const response = yield* applyZipCallback(outcome as ZipCallback).pipe(
+          Effect.orElseSucceed(() => null),
         )
-        if (response.ok) continue
+        if (response?.status === 200) continue
       }
       // A hard-killed archive cannot safely be retried without knowing its multipart outcome.
       yield* database.execute("maintenance.expiredLease", (db) =>
@@ -79,7 +71,10 @@ export const maintenance = Effect.gen(function* () {
               now(),
               upload.id,
             ],
-            ["DELETE FROM uploads WHERE id=? AND status IN ('pending','uploaded','failed') AND entryId IS NULL", upload.id],
+            [
+              "DELETE FROM uploads WHERE id=? AND status IN ('pending','uploaded','failed') AND entryId IS NULL",
+              upload.id,
+            ],
           ])
         }),
       )

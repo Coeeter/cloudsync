@@ -375,7 +375,10 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
             if (!row) return yield* notFound()
             return yield* entry(row)
           }
-          if (!["pending","uploaded"].includes(upload.status) || upload.expiresAt < new Date().toISOString())
+          if (
+            !["pending", "uploaded"].includes(upload.status) ||
+            upload.expiresAt < new Date().toISOString()
+          )
             return yield* invalidInput("Upload expired; start it again")
           if (!upload.previewEntryId) {
             const object = yield* storage.head(upload.objectKey)
@@ -523,7 +526,10 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
           const ticket = yield* storage.downloadUrl(row.objectKey, row.name)
           return DownloadTicket.make({ url: ticket.url, expiresAt: ticket.expiresAt.toISOString() })
         })
-      const bulk:CatalogShape["bulk"]=(ids,action,parentId)=>run("bulk",db=>new CatalogStore(db).bulk(ids,action,parentId)).pipe(Effect.map(result=>BulkResult.make(result)))
+      const bulk: CatalogShape["bulk"] = (ids, action, parentId) =>
+        run("bulk", (db) => new CatalogStore(db).bulk(ids, action, parentId)).pipe(
+          Effect.map((result) => BulkResult.make(result)),
+        )
       return Catalog.of({
         list,
         search,
