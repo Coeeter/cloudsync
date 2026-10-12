@@ -79,7 +79,7 @@ try {
     }
   }
   db.exec(
-    "CREATE TRIGGER IF NOT EXISTS entry_parent_insert BEFORE INSERT ON entries WHEN NEW.parentId IS NOT NULL BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM entries WHERE id=NEW.parentId AND kind='directory' AND deletedAt IS NULL AND deleting=0) THEN RAISE(ABORT,'invalid parent') END; END;",
+    "CREATE TRIGGER IF NOT EXISTS entry_parent_insert BEFORE INSERT ON entries WHEN NEW.parentId IS NOT NULL BEGIN SELECT RAISE(ABORT,'invalid parent') WHERE NOT EXISTS(SELECT 1 FROM entries WHERE id=NEW.parentId AND kind='directory' AND deletedAt IS NULL AND deleting=0); END;",
   )
   const fk = db.query("PRAGMA foreign_key_check").all()
   if (fk.length) throw new Error("Foreign key reconciliation failed")

@@ -13,11 +13,11 @@ CREATE UNIQUE INDEX entries_active_name ON entries(coalesce(parentId,''), normal
 CREATE INDEX entries_parent ON entries(parentId);
 CREATE INDEX entries_trash ON entries(trashRootId,deletedAt);
 CREATE TRIGGER entry_parent_insert BEFORE INSERT ON entries WHEN NEW.parentId IS NOT NULL BEGIN
- SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM entries WHERE id=NEW.parentId AND kind='directory' AND deletedAt IS NULL AND deleting=0) THEN RAISE(ABORT,'invalid parent') END;
+ SELECT RAISE(ABORT,'invalid parent') WHERE NOT EXISTS(SELECT 1 FROM entries WHERE id=NEW.parentId AND kind='directory' AND deletedAt IS NULL AND deleting=0);
 END;
 CREATE TRIGGER entry_parent_update BEFORE UPDATE OF parentId ON entries WHEN NEW.parentId IS NOT NULL AND NEW.deletedAt IS NULL BEGIN
- SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM entries WHERE id=NEW.parentId AND kind='directory' AND deletedAt IS NULL AND deleting=0) THEN RAISE(ABORT,'invalid parent') END;
- SELECT CASE WHEN EXISTS(WITH RECURSIVE ancestors(id,parentId) AS (SELECT id,parentId FROM entries WHERE id=NEW.parentId UNION SELECT e.id,e.parentId FROM entries e JOIN ancestors a ON e.id=a.parentId) SELECT 1 FROM ancestors WHERE id=NEW.id) THEN RAISE(ABORT,'cycle') END;
+ SELECT RAISE(ABORT,'invalid parent') WHERE NOT EXISTS(SELECT 1 FROM entries WHERE id=NEW.parentId AND kind='directory' AND deletedAt IS NULL AND deleting=0);
+ SELECT RAISE(ABORT,'cycle') WHERE EXISTS(WITH RECURSIVE ancestors(id,parentId) AS (SELECT id,parentId FROM entries WHERE id=NEW.parentId UNION SELECT e.id,e.parentId FROM entries e JOIN ancestors a ON e.id=a.parentId) SELECT 1 FROM ancestors WHERE id=NEW.id);
 END;
 CREATE TRIGGER entries_revision_insert AFTER INSERT ON entries BEGIN UPDATE revision SET value=value+1 WHERE id=1; END;
 CREATE TRIGGER entries_revision_update AFTER UPDATE ON entries BEGIN UPDATE revision SET value=value+1 WHERE id=1; END;
