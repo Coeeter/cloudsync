@@ -12,6 +12,8 @@
     "prod": {
       "name": "cloudsync",
       "account_id": "00000000000000000000000000000000",
+      // Wrangler disables workers.dev whenever routes are set; the deploy health check uses it.
+      "workers_dev": true,
       "routes": [{"pattern": "sync.example.com", "custom_domain": true}],
       "triggers": {"crons": ["*/5 * * * *"]},
       "vars": {"NODE_ENV":"production"},
