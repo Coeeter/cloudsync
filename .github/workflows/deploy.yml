@@ -120,7 +120,8 @@ jobs:
 
       - name: Check deployed Worker
         run: |
-          urls="$(jq -r 'select(.type == "deploy") | .targets[]?' "$RUNNER_TEMP/wrangler.ndjson")"
+          # Custom domains are reported as "host (custom domain)" without a scheme.
+          urls="$(jq -r 'select(.type == "deploy") | .targets[]? | split(" ")[0] | if startswith("http") then . else "https://" + . end' "$RUNNER_TEMP/wrangler.ndjson")"
           test -n "$urls"
           # A newly attached custom domain can take a minute or two to start serving.
           for url in $urls; do
