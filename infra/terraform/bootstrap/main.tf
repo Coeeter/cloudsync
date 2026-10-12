@@ -43,7 +43,8 @@ resource "aws_iam_role" "deploy" {
       Condition = {
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-          "token.actions.githubusercontent.com:sub" = "repo:Coeeter/cloudsync:ref:refs/heads/main"
+          # The repository uses GitHub's immutable subject format (owner and repo IDs appended).
+          "token.actions.githubusercontent.com:sub" = "repo:Coeeter@83153784/cloudsync@1389261968:ref:refs/heads/main"
         }
       }
     }]
