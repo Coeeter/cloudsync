@@ -1037,7 +1037,7 @@ function EntryCard({
                       <Download /> Download
                     </DropdownMenuItem>
                     {entry.previewStatus === "failed" ? (
-                      <DropdownMenuItem onSelect={() => void mutate(retryPreviewAtom, entry.id)}>
+                      <DropdownMenuItem onSelect={() => void mutate(retryPreviewAtom, entry)}>
                         <RotateCcw /> Retry preview
                       </DropdownMenuItem>
                     ) : null}
@@ -1305,7 +1305,7 @@ function Lightbox({ entry, entries }: { entry: Entry | null; entries: ReadonlyAr
           </div>
           {entry ? (
             entry.previewStatus === "failed" ? (
-              <Button variant="ghost" onClick={() => void mutate(retryPreviewAtom, entry.id)}>
+              <Button variant="ghost" onClick={() => void mutate(retryPreviewAtom, entry)}>
                 <RotateCcw size={16} /> Retry preview
               </Button>
             ) : null

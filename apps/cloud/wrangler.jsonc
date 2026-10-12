@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "cloudsync-local",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-10-08",
+  "compatibility_flags": ["nodejs_compat", "nodejs_compat_populate_process_env"],
+  "d1_databases": [{"binding":"DB","database_name":"cloudsync","database_id":"local-cloudsync","migrations_dir":"../../packages/db/migrations"}],
+  "vars": {"NODE_ENV":"development"},
+  "triggers": {"crons": ["*/5 * * * *"]},
+  "observability": {"enabled": true},
+  "env": {
+    "dev": {
+      "name": "cloudsync-dev",
+      "triggers": {"crons": []},
+      "vars": {"NODE_ENV":"production"},
+      "d1_databases": [{"binding":"DB","database_name":"cloudsync-dev","database_id":"REPLACE_AFTER_AUTHORIZED_CREATION","migrations_dir":"../../packages/db/migrations"}]
+    },
+    "prod": {
+      "name": "cloudsync",
+      "triggers": {"crons": []},
+      "vars": {"NODE_ENV":"production"},
+      "d1_databases": [{"binding":"DB","database_name":"cloudsync-prod","database_id":"REPLACE_AFTER_AUTHORIZED_CREATION","migrations_dir":"../../packages/db/migrations"}]
+    }
+  }
+}

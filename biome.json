@@ -9,7 +9,9 @@
       "!!**/dist-worker",
       "!!**/out",
       "!!**/.turbo",
-      "!!**/tmp"
+      "!!**/tmp",
+      "!!**/dist-lambda",
+      "!!**/.wrangler"
     ]
   },
   "formatter": {

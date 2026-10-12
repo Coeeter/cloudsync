@@ -83,6 +83,8 @@ export const rpcHandlers = Effect.gen(function* () {
       protect(sessionToken, options.headers, catalog.deletePermanently(id)),
     "upload.begin": ({ sessionToken, ...input }, options) =>
       protect(sessionToken, options.headers, catalog.beginUpload(input)),
+    "upload.beginPreview": ({ sessionToken, id, previews }, options) =>
+      protect(sessionToken, options.headers, catalog.beginPreview(id, previews)),
     "upload.finalize": ({ sessionToken, uploadId }, options) =>
       protect(sessionToken, options.headers, catalog.finalizeUpload(uploadId)),
     "download.file": ({ sessionToken, id }, options) =>

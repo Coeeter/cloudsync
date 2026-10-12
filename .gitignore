@@ -16,3 +16,10 @@ dist-worker/
 
 # Generated CloudFront rollout snapshots
 tmp/
+
+.wrangler/
+.dev.vars*
+dist-lambda/
+.terraform/
+*.tfstate*
+*.tfplan

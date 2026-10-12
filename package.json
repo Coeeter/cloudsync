@@ -10,13 +10,12 @@
   "scripts": {
     "build": "turbo run build",
     "check": "turbo run check",
-    "dev": "turbo run dev dev:worker --parallel",
+    "dev": "turbo run dev --parallel",
     "format": "biome format --write .",
     "lint": "biome lint .",
     "prepare": "effect-tsgo patch",
     "test": "turbo run test",
-    "db:generate": "bun --filter @cloudsync/db generate",
-    "db:migrate": "bun --filter @cloudsync/db migrate"
+    "db:migrate": "bun --filter @cloudsync/cloud db:local"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.5",

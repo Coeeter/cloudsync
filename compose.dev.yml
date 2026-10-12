@@ -1,4 +1,12 @@
 services:
+  s3:
+    image: adobe/s3mock@sha256:ab01a6946750f451ca215a47e91030695b260e4003b8a5a6201d25029b8fca92
+    environment:
+      initialBuckets: cloudsync-local
+      retainFilesOnExit: "true"
+      root: /data
+    ports: ["54332:9090"]
+    volumes: ["cloudsync-s3:/data"]
   postgres:
     image: postgres:17-alpine
     environment:
@@ -14,4 +22,5 @@ services:
     volumes: ["cloudsync-postgres:/var/lib/postgresql/data"]
 
 volumes:
+  cloudsync-s3:
   cloudsync-postgres:

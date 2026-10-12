@@ -7,7 +7,7 @@ export interface DesktopConfigShape {
 
 const RawConfig = Config.all({
   cloudUrl: Config.NonEmptyString("CLOUDSYNC_URL").pipe(
-    Config.withDefault(app.isPackaged ? "https://sync.example.com" : "http://localhost:3000"),
+    Config.withDefault(app.isPackaged ? "https://sync.example.com" : "http://localhost:3310"),
   ),
 })
 

@@ -1,13 +1,7 @@
 import { strict as assert } from "node:assert"
-import { createHash } from "node:crypto"
-import { writeFile } from "node:fs/promises"
 import { getSignedUrl } from "@aws-sdk/cloudfront-signer"
-import { Database, schema } from "@cloudsync/db"
-import { eq, inArray } from "drizzle-orm"
-import { Context, Effect, Layer, Redacted } from "effect"
-import { HttpRouter } from "effect/unstable/http"
+import { Effect, Layer, Redacted } from "effect"
 import { CloudConfig } from "../src/server/config"
-import { RoutesLive } from "../src/server/layers"
 import { Storage } from "../src/server/services/storage"
 
 const config = await Effect.runPromise(CloudConfig.pipe(Effect.provide(CloudConfig.layer)))
@@ -66,86 +60,3 @@ await Effect.runPromise(
     )
   }).pipe(Effect.provide(layer)),
 )
-
-const connection = process.env.CLOUDSYNC_TEST_DATABASE_URL
-if (connection) {
-  if (new URL(connection).hostname !== "127.0.0.1")
-    throw new Error("Use a disposable local database")
-  if (Redacted.value(config.databaseUrl) !== connection)
-    throw new Error(
-      "Set DATABASE_URL to the test database before launching; preserve only that value through Doppler",
-    )
-  const handler = HttpRouter.toWebHandler(RoutesLive, { disableLogger: true })
-  const folderId = crypto.randomUUID()
-  const entryId = crypto.randomUUID()
-  const token = crypto.randomUUID()
-  const tokenHash = createHash("sha256").update(token).digest("hex")
-  const source = `objects/cdn-validation/${entryId}.bin`
-  const database = Database.layer({ connectionString: Redacted.make(connection) })
-  const infrastructure = Layer.mergeAll(database, layer)
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      const db = yield* Database
-      const storage = yield* Storage
-      yield* Effect.gen(function* () {
-        yield* storage.put(source, new Uint8Array([1, 2, 3, 4]), "application/octet-stream")
-        yield* db.execute("fixture", async (client) => {
-          await client.insert(schema.sessions).values({
-            email: config.ownerEmail.trim().toLowerCase(),
-            tokenHash,
-            expiresAt: new Date(Date.now() + 60_000),
-          })
-          await client.insert(schema.entries).values([
-            {
-              id: folderId,
-              name: `fixture-${folderId}`,
-              normalizedName: `fixture-${folderId}`,
-              kind: "directory",
-            },
-            {
-              id: entryId,
-              parentId: folderId,
-              name: "fixture.bin",
-              normalizedName: "fixture.bin",
-              kind: "file",
-              objectKey: source,
-              mimeType: "application/octet-stream",
-              size: 4,
-            },
-          ])
-        })
-        yield* Effect.tryPromise(async () => {
-          const endpoint = `http://localhost/download/folder/${folderId}`
-          const denied = await handler.handler(new Request(endpoint), Context.empty())
-          assert.equal(denied.status, 404)
-          const response = await handler.handler(
-            new Request(endpoint, { headers: { cookie: `cloudsync_session=${token}` } }),
-            Context.empty(),
-          )
-          assert.equal(response.status, 200)
-          assert.equal(response.headers.get("content-type"), "application/zip")
-          await writeFile(
-            "/tmp/cloudsync-cdn-validation.zip",
-            new Uint8Array(await response.arrayBuffer()),
-          )
-          console.log(
-            "PASS: real folder-download HTTP route rejects unauthenticated requests and streams a ZIP using authorized CDN inputs",
-          )
-        })
-      }).pipe(
-        Effect.ensuring(
-          Effect.gen(function* () {
-            yield* storage.delete(source)
-            yield* db.execute("cleanup", async (client) => {
-              await client
-                .delete(schema.entries)
-                .where(inArray(schema.entries.id, [entryId, folderId]))
-              await client.delete(schema.sessions).where(eq(schema.sessions.tokenHash, tokenHash))
-            })
-            yield* Effect.promise(() => handler.dispose())
-          }),
-        ),
-      )
-    }).pipe(Effect.provide(infrastructure)),
-  )
-}

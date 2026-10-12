@@ -9,8 +9,8 @@ afterAll(() => server.stop(true))
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
 const config: CloudConfigShape = {
   nodeEnv: "development",
-  databaseUrl: Redacted.make("unused"),
-  migrationsDir: "unused",
+  zipServiceUrl: null,
+  zipServiceSecret: Redacted.make("unused"),
   ownerEmail: "fixture@example.com",
   sessionSecret: Redacted.make("unused"),
   publicUrl: "http://localhost:3000",

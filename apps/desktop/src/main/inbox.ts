@@ -176,7 +176,9 @@ export class Inbox extends Context.Service<Inbox, InboxShape>()("@cloudsync/desk
             try: (signal) => createLocalPreviews(bytes, mimeType, signal),
             catch: (cause) => inboxError("Local preview generation failed")(cause),
           }).pipe(
-            Effect.tapError(() => Effect.logWarning("Local preview failed; using worker fallback")),
+            Effect.tapError(() =>
+              Effect.logWarning("Local preview failed; the original will have no preview"),
+            ),
             Effect.orElseSucceed(() => null),
           )
           yield* completeDirectUpload(

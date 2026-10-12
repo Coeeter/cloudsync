@@ -1,9 +1,10 @@
-import { resolve } from "node:path"
+import { env } from "cloudflare:workers"
 import { Database } from "@cloudsync/db"
 import { CloudSyncRpcs } from "@cloudsync/domain"
 import { Effect, Layer, Schema } from "effect"
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc"
+import { zipCallback } from "./zip-callback"
 import { CloudConfig } from "./config"
 import { rpcHandlers } from "./rpc-handlers"
 import { Auth } from "./services/auth"
@@ -11,16 +12,7 @@ import { Catalog } from "./services/catalog"
 import { Archives } from "./services/archives"
 import { Storage, VIEWER_COOKIE_TTL_SECONDS } from "./services/storage"
 
-const DatabaseLive = Layer.unwrap(
-  CloudConfig.pipe(
-    Effect.map((config) =>
-      Database.layer({
-        connectionString: config.databaseUrl,
-        migrationsFolder: resolve(config.migrationsDir),
-      }),
-    ),
-  ),
-)
+const DatabaseLive = Database.layer(env.DB)
 
 export const InfrastructureLive = Layer.mergeAll(DatabaseLive, Storage.layer).pipe(
   Layer.provideMerge(CloudConfig.layer),
@@ -97,6 +89,10 @@ const LogoutRoute = HttpRouter.add(
 
 const HealthRoute = HttpRouter.add("GET", "/health", HttpServerResponse.jsonUnsafe({ ok: true }))
 
-export const RoutesLive = Layer.mergeAll(RpcRoutes, SessionRoute, LogoutRoute, HealthRoute).pipe(
-  Layer.provideMerge(ServicesLive),
-)
+export const RoutesLive = Layer.mergeAll(
+  RpcRoutes,
+  SessionRoute,
+  LogoutRoute,
+  HealthRoute,
+  HttpRouter.add("POST", "/internal/zip", zipCallback),
+).pipe(Layer.provideMerge(ServicesLive))

@@ -4,6 +4,7 @@ import { Effect, Layer, ManagedRuntime } from "effect"
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from "electron"
 import { DesktopConfig } from "./config"
 import { Inbox, type InboxSnapshot } from "./inbox"
+import { missingPreviewTools } from "./preview"
 import { Remote } from "./remote"
 import { DesktopStore, type SavedSettings } from "./store"
 
@@ -15,6 +16,7 @@ const AppLive = Layer.mergeAll(DesktopStore.layer, InboxLive).pipe(
 const runtime = ManagedRuntime.make(AppLive)
 
 export interface DesktopSnapshot extends InboxSnapshot {
+  readonly missingTools: readonly string[]
   readonly authenticated: boolean
   readonly email: string | null
   readonly cloudUrl: string
@@ -28,6 +30,7 @@ let settings: SavedSettings = { inbox: null, email: null, encryptedToken: null }
 let token: string | null = null
 let error: string | null = null
 let cloudUrl = ""
+let missingTools: string[] = []
 
 const message = (cause: unknown): string => {
   if (typeof cause === "object" && cause !== null && "message" in cause) {
@@ -44,6 +47,7 @@ const snapshot = () =>
       const status = yield* inbox.snapshot
       return {
         ...status,
+        missingTools,
         authenticated: token !== null,
         email: settings.email,
         cloudUrl,
@@ -70,7 +74,7 @@ const persist = (next: SavedSettings) =>
 const startInbox = () =>
   runtime.runPromise(
     Effect.gen(function* () {
-      if (!settings.inbox || !token) return
+      if (missingTools.length || !settings.inbox || !token) return
       const inbox = yield* Inbox
       yield* inbox.start(settings.inbox, token)
     }),
@@ -81,6 +85,7 @@ const startInbox = () =>
 const handle = (channel: string, operation: (argument: string) => Promise<void>) =>
   ipcMain.handle(channel, async (_event, argument: unknown) => {
     try {
+      if (missingTools.length) throw new Error("Install the required tools and restart CloudSync")
       await operation(typeof argument === "string" ? argument : "")
       error = null
     } catch (cause) {
@@ -202,6 +207,7 @@ function registerIpc() {
 }
 
 async function bootstrap() {
+  missingTools = await missingPreviewTools()
   await runtime.context()
   cloudUrl = await runtime.runPromise(Effect.map(DesktopConfig, (config) => config.cloudUrl))
   settings = await runtime.runPromise(Effect.flatMap(DesktopStore, (store) => store.load))
@@ -211,7 +217,7 @@ async function bootstrap() {
         .runPromise(Effect.flatMap(DesktopStore, (store) => store.decryptToken(encrypted)))
         .catch(() => null)
     : null
-  if (saved) {
+  if (saved && !missingTools.length) {
     const verdict = await runtime.runPromise(
       Effect.flatMap(Remote, (remote) => remote.authenticate(saved)).pipe(
         Effect.as("valid" as const),
@@ -224,7 +230,8 @@ async function bootstrap() {
     if (verdict !== "rejected") token = saved
     if (verdict === "offline") error = `Could not reach ${cloudUrl}. Uploads will retry.`
   }
-  if (encrypted && !token) await persist({ ...settings, encryptedToken: null })
+  if (encrypted && !token && !missingTools.length)
+    await persist({ ...settings, encryptedToken: null })
   registerIpc()
   await runtime.runPromise(Effect.map(Inbox, (inbox) => inbox.subscribe(() => void publish())))
 

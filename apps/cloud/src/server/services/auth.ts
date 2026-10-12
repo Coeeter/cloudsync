@@ -6,24 +6,40 @@ import {
   randomUUID,
   timingSafeEqual,
 } from "node:crypto"
-import { Database, type DatabaseError, schema } from "@cloudsync/db"
+import { Database, type DatabaseError } from "@cloudsync/db"
 import { CloudSyncError, Ok, Session } from "@cloudsync/domain"
-import { and, desc, eq, gt, isNull, sql } from "drizzle-orm"
-import { Context, Effect, Layer, Redacted, Schema } from "effect"
+import { Context, Effect, Layer, Redacted } from "effect"
 import { Resend } from "resend"
 import { CloudConfig } from "../config"
+import { now } from "../persistence/catalog"
 
-const PIN_LIFETIME_MS = 10 * 60 * 1000
-const SESSION_LIFETIME_MS = 28 * 24 * 60 * 60 * 1000
-
-export class EmailDeliveryError extends Schema.TaggedError<EmailDeliveryError>()(
-  "EmailDeliveryError",
-  {
-    message: Schema.String,
-    cause: Schema.Defect(),
-  },
-) {}
-
+const hash = (token: string) => createHash("sha256").update(token).digest("hex")
+const unauthorized = () =>
+  new CloudSyncError({ code: "UNAUTHORIZED", message: "That code or session is no longer valid" })
+function cookie(header: string | undefined) {
+  try {
+    return header
+      ?.split(";")
+      .map((p) => p.trim())
+      .find((p) => p.startsWith("cloudsync_session="))
+      ?.slice(18)
+  } catch {
+    return undefined
+  }
+}
+interface Pin {
+  id: string
+  email: string
+  codeHash: string
+  attempts: number
+  expiresAt: string
+  consumedAt: string | null
+}
+interface SessionRow {
+  id: string
+  email: string
+  expiresAt: string
+}
 export interface AuthShape {
   readonly requestPin: (email: string) => Effect.Effect<Ok, CloudSyncError | DatabaseError>
   readonly verifyPin: (
@@ -37,23 +53,6 @@ export interface AuthShape {
   ) => Effect.Effect<Session, CloudSyncError | DatabaseError>
   readonly revoke: (cookieHeader: string | undefined) => Effect.Effect<void>
 }
-
-function hashToken(token: string): string {
-  return createHash("sha256").update(token).digest("hex")
-}
-
-function cookieValue(cookieHeader: string | undefined, name: string): string | undefined {
-  if (!cookieHeader) return undefined
-  for (const part of cookieHeader.split(";")) {
-    const [key, ...rest] = part.trim().split("=")
-    if (key === name) return decodeURIComponent(rest.join("="))
-  }
-  return undefined
-}
-
-const unauthorized = () =>
-  new CloudSyncError({ code: "UNAUTHORIZED", message: "That code or session is no longer valid" })
-
 export class Auth extends Context.Service<Auth, AuthShape>()("@cloudsync/cloud/Auth") {
   static readonly layer = Layer.effect(
     Auth,
@@ -61,170 +60,126 @@ export class Auth extends Context.Service<Auth, AuthShape>()("@cloudsync/cloud/A
       const config = yield* CloudConfig
       const database = yield* Database
       const resend = new Resend(Redacted.value(config.resend.apiKey))
-      const ownerEmail = config.ownerEmail.trim().toLocaleLowerCase("en")
-      const sessionSecret = Redacted.value(config.sessionSecret)
-      const hashPin = (id: string, code: string) =>
-        createHmac("sha256", sessionSecret).update(`${id}:${code}`).digest("hex")
-
-      const requestPin: AuthShape["requestPin"] = Effect.fn("Auth.requestPin")(
-        function* (emailInput) {
-          const email = emailInput.trim().toLocaleLowerCase("en")
-          if (email !== ownerEmail) return new Ok({ ok: true })
-
-          const since = new Date(Date.now() - 15 * 60 * 1000)
-          const count = yield* database.execute("auth.countRecentPins", async (db) => {
-            const [result] = await db
-              .select({ count: sql<number>`count(*)::int` })
-              .from(schema.authPins)
-              .where(and(eq(schema.authPins.email, email), gt(schema.authPins.createdAt, since)))
-            return result?.count ?? 0
-          })
-          if (count >= 5) {
+      const owner = config.ownerEmail.trim().toLocaleLowerCase("en")
+      const pinHash = (id: string, code: string) =>
+        createHmac("sha256", Redacted.value(config.sessionSecret))
+          .update(`${id}:${code}`)
+          .digest("hex")
+      const requestPin: AuthShape["requestPin"] = (input) =>
+        Effect.gen(function* () {
+          const email = input.trim().toLocaleLowerCase("en")
+          if (email !== owner) return Ok.make({ ok: true })
+          const id = randomUUID()
+          const code = randomInt(0, 1_000_000).toString().padStart(6, "0")
+          const inserted = yield* database.execute("auth.pin", (db) =>
+            db.run(
+              `INSERT INTO auth_pins(id,email,codeHash,expiresAt,createdAt)
+    SELECT ?,?,?,?,? WHERE (SELECT count(*) FROM auth_pins WHERE email=? AND createdAt>?)<5`,
+              id,
+              email,
+              pinHash(id, code),
+              new Date(Date.now() + 10 * 60_000).toISOString(),
+              now(),
+              email,
+              new Date(Date.now() - 15 * 60_000).toISOString(),
+            ),
+          )
+          if (!inserted)
             return yield* new CloudSyncError({
               code: "RATE_LIMITED",
               message: "Try again in a few minutes",
             })
-          }
-
-          const id = randomUUID()
-          const code = randomInt(0, 1_000_000).toString().padStart(6, "0")
-          yield* database.execute("auth.createPin", (db) =>
-            db.insert(schema.authPins).values({
-              id,
-              email,
-              codeHash: hashPin(id, code),
-              expiresAt: new Date(Date.now() + PIN_LIFETIME_MS),
-            }),
-          )
-
-          const result = yield* Effect.tryPromise({
-            try: () =>
-              resend.emails.send({
+          yield* Effect.tryPromise({
+            try: async () => {
+              const result = await resend.emails.send({
                 from: config.resend.from,
                 to: email,
                 subject: `${code} is your CloudSync code`,
                 text: `${code} is your CloudSync sign-in code. It expires in 10 minutes.`,
-              }),
-            catch: (cause) =>
-              new EmailDeliveryError({
-                message: cause instanceof Error ? cause.message : "Email delivery failed",
-                cause,
+              })
+              if (result.error) throw new Error("Email rejected")
+            },
+            catch: () =>
+              new CloudSyncError({
+                code: "INTERNAL",
+                message: "The sign-in email could not be sent. Try again shortly.",
               }),
           })
-          if (result.error) {
-            return yield* new EmailDeliveryError({
-              message: result.error.message,
-              cause: result.error,
-            })
-          }
-          return new Ok({ ok: true })
-        },
-        (effect) =>
-          effect.pipe(
-            Effect.tapErrorTag("EmailDeliveryError", (error) =>
-              Effect.logError("PIN email delivery failed").pipe(
-                Effect.annotateLogs({ reason: error.message }),
-              ),
+          return Ok.make({ ok: true })
+        })
+      const verifyPin: AuthShape["verifyPin"] = (input, code, _client) =>
+        Effect.gen(function* () {
+          const email = input.trim().toLocaleLowerCase("en")
+          if (email !== owner) return yield* unauthorized()
+          const pin = yield* database.execute("auth.findPin", (db) =>
+            db.first<Pin>(
+              "SELECT * FROM auth_pins WHERE email=? AND consumedAt IS NULL AND expiresAt>? ORDER BY createdAt DESC LIMIT 1",
+              email,
+              now(),
             ),
-            Effect.catchTag("EmailDeliveryError", () =>
-              Effect.fail(
-                new CloudSyncError({
-                  code: "INTERNAL",
-                  message: "The sign-in email could not be sent. Try again shortly.",
-                }),
-              ),
-            ),
-          ),
-      )
-
-      const verifyPin: AuthShape["verifyPin"] = Effect.fn("Auth.verifyPin")(
-        function* (emailInput, code, _client) {
-          const email = emailInput.trim().toLocaleLowerCase("en")
-          if (email !== ownerEmail) return yield* unauthorized()
-
-          const pin = yield* database.execute("auth.findPin", async (db) => {
-            const [result] = await db
-              .select()
-              .from(schema.authPins)
-              .where(
-                and(
-                  eq(schema.authPins.email, email),
-                  isNull(schema.authPins.consumedAt),
-                  gt(schema.authPins.expiresAt, new Date()),
-                ),
-              )
-              .orderBy(desc(schema.authPins.createdAt))
-              .limit(1)
-            return result
-          })
+          )
           if (!pin || pin.attempts >= 5) return yield* unauthorized()
-          const actual = Buffer.from(hashPin(pin.id, code))
           const expected = Buffer.from(pin.codeHash)
-          if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
-            yield* database.execute("auth.recordFailedAttempt", (db) =>
-              db
-                .update(schema.authPins)
-                .set({ attempts: sql`${schema.authPins.attempts} + 1` })
-                .where(eq(schema.authPins.id, pin.id)),
+          const actual = Buffer.from(pinHash(pin.id, code))
+          if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+            yield* database.execute("auth.attempt", (db) =>
+              db.run(
+                "UPDATE auth_pins SET attempts=attempts+1 WHERE id=? AND consumedAt IS NULL",
+                pin.id,
+              ),
             )
             return yield* unauthorized()
           }
-
-          const token = randomBytes(32).toString("base64url")
-          const expiresAt = new Date(Date.now() + SESSION_LIFETIME_MS)
-          yield* database.execute("auth.createSession", (db) =>
-            db.transaction(async (tx) => {
-              await tx
-                .update(schema.authPins)
-                .set({ consumedAt: new Date() })
-                .where(eq(schema.authPins.id, pin.id))
-              await tx
-                .insert(schema.sessions)
-                .values({ email, tokenHash: hashToken(token), expiresAt })
-            }),
-          )
-          return new Session({ email, expiresAt: expiresAt.toISOString(), token })
-        },
-      )
-
-      const authenticate: AuthShape["authenticate"] = Effect.fn("Auth.authenticate")(
-        function* (explicitToken, cookieHeader) {
-          const token = explicitToken ?? cookieValue(cookieHeader, "cloudsync_session")
+          const token = Buffer.from(randomBytes(32)).toString("base64url")
+          const expiresAt = new Date(Date.now() + 28 * 24 * 60 * 60_000).toISOString()
+          yield* database
+            .execute("auth.consume", (db) =>
+              db.batch([
+                [
+                  "INSERT INTO assertions(value) SELECT CASE WHEN consumedAt IS NULL AND attempts<5 AND expiresAt>? THEN 1 ELSE 0 END FROM auth_pins WHERE id=?",
+                  now(),
+                  pin.id,
+                ],
+                ["UPDATE auth_pins SET consumedAt=? WHERE id=?", now(), pin.id],
+                [
+                  "INSERT INTO sessions(id,email,tokenHash,expiresAt,lastSeenAt,createdAt) VALUES(?,?,?,?,?,?)",
+                  randomUUID(),
+                  email,
+                  hash(token),
+                  expiresAt,
+                  now(),
+                  now(),
+                ],
+                ["DELETE FROM assertions"],
+              ]),
+            )
+            .pipe(Effect.catchTag("DatabaseError", () => Effect.fail(unauthorized())))
+          return Session.make({ email, expiresAt, token })
+        })
+      const authenticate: AuthShape["authenticate"] = (explicit, header) =>
+        Effect.gen(function* () {
+          const token = explicit ?? cookie(header)
           if (!token) return yield* unauthorized()
-          const session = yield* database.execute("auth.findSession", async (db) => {
-            const [result] = await db
-              .select()
-              .from(schema.sessions)
-              .where(
-                and(
-                  eq(schema.sessions.tokenHash, hashToken(token)),
-                  gt(schema.sessions.expiresAt, new Date()),
-                ),
+          const row = yield* database.execute("auth.session", (db) =>
+            db.first<SessionRow>(
+              "SELECT * FROM sessions WHERE tokenHash=? AND expiresAt>?",
+              hash(token),
+              now(),
+            ),
+          )
+          if (!row || row.email !== owner) return yield* unauthorized()
+          return Session.make({ email: row.email, expiresAt: row.expiresAt })
+        })
+      const revoke: AuthShape["revoke"] = (header) => {
+        const token = cookie(header)
+        return token
+          ? database
+              .execute("auth.revoke", (db) =>
+                db.run("DELETE FROM sessions WHERE tokenHash=?", hash(token)),
               )
-              .limit(1)
-            return result
-          })
-          if (!session || session.email !== ownerEmail) return yield* unauthorized()
-          yield* database.execute("auth.touchSession", (db) =>
-            db
-              .update(schema.sessions)
-              .set({ lastSeenAt: new Date() })
-              .where(eq(schema.sessions.id, session.id)),
-          )
-          return new Session({ email: session.email, expiresAt: session.expiresAt.toISOString() })
-        },
-      )
-
-      const revoke: AuthShape["revoke"] = (cookieHeader) => {
-        const token = cookieValue(cookieHeader, "cloudsync_session")
-        if (!token) return Effect.void
-        return database
-          .execute("auth.revoke", (db) =>
-            db.delete(schema.sessions).where(eq(schema.sessions.tokenHash, hashToken(token))),
-          )
-          .pipe(Effect.ignore)
+              .pipe(Effect.ignore)
+          : Effect.void
       }
-
       return Auth.of({ requestPin, verifyPin, authenticate, revoke })
     }),
   )

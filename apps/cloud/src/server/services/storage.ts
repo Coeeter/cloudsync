@@ -1,17 +1,9 @@
 import { Readable } from "node:stream"
-import { Upload } from "@aws-sdk/lib-storage"
-import {
-  DeleteObjectCommand,
-  HeadObjectCommand,
-  type HeadObjectOutput,
-  PutObjectCommand,
-  S3Client,
-} from "@aws-sdk/client-s3"
+import { AwsClient } from "aws4fetch"
 import {
   getSignedUrl as getCloudFrontSignedUrl,
   getSignedCookies,
 } from "@aws-sdk/cloudfront-signer"
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner"
 import { Context, Effect, Layer, Redacted, Schema } from "effect"
 import { CloudConfig } from "../config"
 
@@ -40,18 +32,19 @@ export interface StorageShape {
     },
     StorageError
   >
-  readonly head: (objectKey: string) => Effect.Effect<HeadObjectOutput, StorageError>
+  readonly head: (
+    objectKey: string,
+  ) => Effect.Effect<
+    { ContentLength: number; ChecksumSHA256: string | null; ContentType: string | null },
+    StorageError
+  >
   readonly get: (objectKey: string) => Effect.Effect<{ readonly body: Readable }, StorageError>
   readonly put: (
     objectKey: string,
     body: Uint8Array,
     contentType: string,
   ) => Effect.Effect<void, StorageError>
-  readonly putStream: (
-    objectKey: string,
-    body: Readable,
-    contentType: string,
-  ) => Effect.Effect<void, StorageError>
+  readonly readJson: (key: string) => Effect.Effect<unknown, StorageError>
   readonly delete: (objectKey: string) => Effect.Effect<void, StorageError>
   readonly viewUrl: (objectKey: string) => Effect.Effect<string, StorageError>
   readonly downloadUrl: (
@@ -76,32 +69,36 @@ export class Storage extends Context.Service<Storage, StorageShape>()("@cloudsyn
       const config = yield* CloudConfig
       const signing = config.cloudFrontSigning
 
-      const client = yield* Effect.acquireRelease(
-        Effect.sync(
-          () =>
-            new S3Client({
-              region: config.awsRegion,
-              endpoint: config.s3Endpoint ?? undefined,
-              forcePathStyle: config.s3ForcePathStyle,
-              requestChecksumCalculation: "WHEN_REQUIRED",
-            }),
-        ),
-        (s3) => Effect.sync(() => s3.destroy()),
-      )
-      const uploadClient = config.s3PublicEndpoint
-        ? yield* Effect.acquireRelease(
-            Effect.sync(
-              () =>
-                new S3Client({
-                  region: config.awsRegion,
-                  endpoint: config.s3PublicEndpoint as string,
-                  forcePathStyle: config.s3ForcePathStyle,
-                  requestChecksumCalculation: "WHEN_REQUIRED",
-                }),
-            ),
-            (s3) => Effect.sync(() => s3.destroy()),
-          )
-        : client
+      const client = new AwsClient({
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? "",
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? "",
+        sessionToken: process.env.AWS_SESSION_TOKEN,
+        region: config.awsRegion,
+        service: "s3",
+        retries: 2,
+      })
+      const objectUrl = (key: string, publicEndpoint = false) => {
+        const endpoint = (publicEndpoint ? config.s3PublicEndpoint : null) ?? config.s3Endpoint
+        const base = endpoint
+          ? `${endpoint.replace(/\/$/, "")}/${config.s3Bucket}`
+          : `https://${config.s3Bucket}.s3.${config.awsRegion}.amazonaws.com`
+        return `${base}/${key.split("/").map(encodeURIComponent).join("/")}`
+      }
+      const fetchObject = async (
+        key: string,
+        method: string,
+        body?: Uint8Array,
+        contentType?: string,
+      ) => {
+        const response = await client.fetch(objectUrl(key), {
+          method,
+          body: body as Uint8Array<ArrayBuffer> | undefined,
+          headers: contentType ? { "content-type": contentType } : undefined,
+          signal: AbortSignal.timeout(20_000),
+        })
+        if (!response.ok) throw new Error(`Storage returned HTTP ${response.status}`)
+        return response
+      }
       const send = <A>(operation: string, thunk: () => Promise<A>) =>
         Effect.tryPromise({ try: thunk, catch: storageError(operation) }).pipe(
           Effect.withSpan(`Storage.${operation}`),
@@ -109,20 +106,17 @@ export class Storage extends Context.Service<Storage, StorageShape>()("@cloudsyn
 
       const createUploadUrl: StorageShape["createUploadUrl"] = Effect.fn("Storage.createUploadUrl")(
         function* (objectKey, mimeType, checksumSha256) {
-          const command = new PutObjectCommand({
-            Bucket: config.s3Bucket,
-            Key: objectKey,
-            ContentType: mimeType,
-            ChecksumSHA256: checksumSha256,
-          })
-          const url = yield* send("createUploadUrl", () =>
-            // The browser sends these as headers, so they must be signed rather than hoisted into the query.
-            getSignedUrl(uploadClient, command, {
-              expiresIn: UPLOAD_TTL_SECONDS,
-              signableHeaders: new Set(["content-type", "x-amz-checksum-sha256"]),
-              unhoistableHeaders: new Set(["x-amz-checksum-sha256"]),
+          const headers = { "content-type": mimeType, "x-amz-checksum-sha256": checksumSha256 }
+          const target = new URL(objectUrl(objectKey, true))
+          target.searchParams.set("X-Amz-Expires", String(UPLOAD_TTL_SECONDS))
+          const request = yield* send("createUploadUrl", () =>
+            client.sign(target.toString(), {
+              method: "PUT",
+              headers,
+              aws: { signQuery: true, allHeaders: true },
             }),
           )
+          const url = request.url
           return {
             url,
             headers: {
@@ -135,32 +129,23 @@ export class Storage extends Context.Service<Storage, StorageShape>()("@cloudsyn
       )
 
       const head: StorageShape["head"] = (objectKey) =>
-        send("head", () =>
-          client.send(
-            new HeadObjectCommand({
-              Bucket: config.s3Bucket,
-              Key: objectKey,
-              ChecksumMode: "ENABLED",
-            }),
-          ),
-        )
-
-      const put: StorageShape["put"] = (objectKey, body, contentType) =>
-        send("put", () =>
-          client.send(
-            new PutObjectCommand({
-              Bucket: config.s3Bucket,
-              Key: objectKey,
-              Body: body,
-              ContentType: contentType,
-            }),
-          ),
-        ).pipe(Effect.asVoid)
-
-      const remove: StorageShape["delete"] = (objectKey) =>
-        send("delete", () =>
-          client.send(new DeleteObjectCommand({ Bucket: config.s3Bucket, Key: objectKey })),
-        ).pipe(Effect.asVoid)
+        send("head", async () => {
+          const response = await client.fetch(objectUrl(objectKey), {
+            method: "HEAD",
+            headers: { "x-amz-checksum-mode": "ENABLED" },
+            signal: AbortSignal.timeout(20_000),
+          })
+          if (!response.ok) throw new Error(`Storage returned HTTP ${response.status}`)
+          return {
+            ContentLength: Number(response.headers.get("content-length")),
+            ChecksumSHA256: response.headers.get("x-amz-checksum-sha256"),
+            ContentType: response.headers.get("content-type"),
+          }
+        })
+      const put: StorageShape["put"] = (key, body, type) =>
+        send("put", () => fetchObject(key, "PUT", body, type)).pipe(Effect.asVoid)
+      const remove: StorageShape["delete"] = (key) =>
+        send("delete", () => fetchObject(key, "DELETE")).pipe(Effect.asVoid)
 
       const publicObjectUrl = (objectKey: string) =>
         `${config.cloudFrontUrl.replace(/\/$/, "")}/${objectKey
@@ -290,34 +275,7 @@ export class Storage extends Context.Service<Storage, StorageShape>()("@cloudsyn
         head,
         get,
         put,
-        putStream: (objectKey, body, contentType) =>
-          Effect.tryPromise({
-            try: async (signal) => {
-              const upload = new Upload({
-                client,
-                params: {
-                  Bucket: config.s3Bucket,
-                  Key: objectKey,
-                  Body: body,
-                  ContentType: contentType,
-                },
-                queueSize: 2,
-                partSize: 8 * 1024 * 1024,
-                leavePartsOnError: false,
-              })
-              const abort = () => {
-                body.destroy()
-                void upload.abort().catch(() => undefined)
-              }
-              signal.addEventListener("abort", abort, { once: true })
-              try {
-                await upload.done()
-              } finally {
-                signal.removeEventListener("abort", abort)
-              }
-            },
-            catch: storageError("putStream"),
-          }),
+        readJson: (key) => send("readJson", async () => (await fetchObject(key, "GET")).json()),
         delete: remove,
         viewUrl,
         downloadUrl,

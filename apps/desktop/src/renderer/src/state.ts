@@ -3,6 +3,7 @@ import { Atom, AtomRegistry } from "effect/unstable/reactivity"
 import type { DesktopSnapshot } from "../../main"
 
 const empty: DesktopSnapshot = {
+  missingTools: [],
   watching: null,
   pending: 0,
   active: [],

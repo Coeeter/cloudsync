@@ -1,5 +1,5 @@
 import { completeDirectUpload, type PreparedUpload } from "@cloudsync/core"
-import type { Entry, UploadTicket } from "@cloudsync/domain"
+import type { Entry, UploadTicket, ObjectUploadTicket } from "@cloudsync/domain"
 import { Effect, Schema } from "effect"
 import {
   FetchHttpClient,
@@ -8,6 +8,7 @@ import {
   HttpClientResponse,
 } from "effect/unstable/http"
 import { CloudSync } from "./rpc"
+import { createBrowserPreviews } from "./previews"
 
 export class BrowserUploadError extends Schema.TaggedError<BrowserUploadError>()(
   "BrowserUploadError",
@@ -134,6 +135,7 @@ export const uploadBrowserFile = Effect.fn("uploadBrowserFile")(function* (
     }),
   )
 
+  const previews = yield* Effect.promise(() => createBrowserPreviews(file).catch(() => null))
   const client = yield* CloudSync
   const begin = (upload: PreparedUpload) =>
     client("upload.begin", upload).pipe(Effect.mapError(reason("Could not start the upload")))
@@ -141,11 +143,11 @@ export const uploadBrowserFile = Effect.fn("uploadBrowserFile")(function* (
     client("upload.finalize", { uploadId }).pipe(
       Effect.mapError(reason("Could not verify the upload")),
     )
-  const put = (ticket: UploadTicket) =>
+  const putObject = (ticket: ObjectUploadTicket, data: Uint8Array) =>
     Effect.gen(function* () {
       const client = yield* HttpClient.HttpClient
       const request = HttpClientRequest.put(ticket.url).pipe(
-        HttpClientRequest.bodyUint8Array(bytes),
+        HttpClientRequest.bodyUint8Array(data),
         HttpClientRequest.setHeaders(ticket.headers),
       )
       const response = yield* client.execute(request)
@@ -172,7 +174,75 @@ export const uploadBrowserFile = Effect.fn("uploadBrowserFile")(function* (
       mimeType: file.type || "application/octet-stream",
       checksumSha256: base64(digest),
       modifiedAt: new Date(file.lastModified).toISOString(),
+      ...(previews ? { previews: previews.manifest } : {}),
     },
-    { begin, put, finalize },
+    {
+      begin,
+      put: (ticket: UploadTicket) =>
+        Effect.gen(function* () {
+          yield* putObject(ticket, bytes)
+          if (previews && ticket.previews) {
+            yield* Effect.all(
+              [
+                putObject(ticket.previews.thumbnail, previews.thumbnail),
+                putObject(ticket.previews.preview, previews.preview),
+              ],
+              { concurrency: 2 },
+            ).pipe(Effect.ignore)
+          }
+        }),
+      finalize,
+    },
+  )
+})
+
+export const retryBrowserPreview = Effect.fn("retryBrowserPreview")(function* (entry: Entry) {
+  if (!entry.contentUrl)
+    return yield* new BrowserUploadError({ message: "No original available", cause: null })
+  const file = yield* Effect.tryPromise({
+    try: async () => {
+      const response = await fetch(entry.contentUrl as string)
+      if (!response.ok) throw new Error("Download failed")
+      const blob = await response.blob()
+      return new Blob([blob], { type: entry.mimeType ?? blob.type })
+    },
+    catch: reason("Could not read the original"),
+  })
+  const previews = yield* Effect.tryPromise({
+    try: () => createBrowserPreviews(file),
+    catch: reason("This browser could not create a preview"),
+  })
+  if (!previews)
+    return yield* new BrowserUploadError({
+      message: "This file does not support previews",
+      cause: null,
+    })
+  const client = yield* CloudSync
+  const ticket = yield* client("upload.beginPreview", {
+    id: entry.id,
+    previews: previews.manifest,
+  }).pipe(Effect.mapError(reason("Could not replace preview")))
+  if (!ticket.previews)
+    return yield* new BrowserUploadError({
+      message: "Preview upload was not prepared",
+      cause: null,
+    })
+  yield* Effect.tryPromise({
+    try: async () => {
+      for (const kind of ["thumbnail", "preview"] as const) {
+        const target = ticket.previews?.[kind]
+        if (!target) throw new Error("Missing preview ticket")
+        const response = await fetch(target.url, {
+          method: "PUT",
+          headers: target.headers,
+          body: previews[kind] as Uint8Array<ArrayBuffer>,
+        })
+        if (!response.ok) throw new Error("Preview upload rejected")
+      }
+    },
+    catch: reason("Could not upload preview"),
+  })
+  return yield* client("upload.finalize", { uploadId: ticket.uploadId }).pipe(
+    Effect.mapError(reason("Could not verify preview")),
   )
 })

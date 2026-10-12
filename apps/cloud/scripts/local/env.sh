@@ -1,0 +1,10 @@
+export AWS_REGION=ap-southeast-1
+export AWS_ACCESS_KEY_ID=local
+export AWS_SECRET_ACCESS_KEY=local
+export S3_BUCKET=cloudsync-local
+export S3_ENDPOINT=http://127.0.0.1:54332
+export ZIP_SERVICE_SECRET=local-zip-secret
+export CALLBACK_URL=http://localhost:3310/internal/zip
+export LAMBDA_ENDPOINT=http://127.0.0.1:3312
+export ZIP_BUILDER_FUNCTION_NAME=local-zip
+export CLOUDSYNC_E2E_URL=http://localhost:3310

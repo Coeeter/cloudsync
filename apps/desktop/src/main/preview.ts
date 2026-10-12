@@ -11,7 +11,7 @@ import type { PreviewManifest } from "@cloudsync/domain"
 const execute = promisify(execFile)
 
 // Finder-launched apps do not inherit the shell's Homebrew PATH.
-function executable(name: string) {
+export function executable(name: string) {
   return (
     ["/opt/homebrew/bin", "/usr/local/bin"]
       .map((directory) => join(directory, name))
@@ -123,4 +123,22 @@ export async function createLocalPreviews(
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
+}
+
+export async function missingPreviewTools(): Promise<string[]> {
+  const checks = await Promise.all(
+    ["ffmpeg", "pdftoppm", "cwebp"].map(async (name) => {
+      try {
+        await execute(
+          executable(name),
+          [name === "ffmpeg" ? "-version" : name === "cwebp" ? "-version" : "-v"],
+          { timeout: 5000 },
+        )
+        return null
+      } catch {
+        return name
+      }
+    }),
+  )
+  return checks.filter((name): name is string => name !== null)
 }

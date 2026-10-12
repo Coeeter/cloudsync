@@ -27,6 +27,26 @@ export function App() {
     return () => unsubscribe()
   }, [])
 
+  if (state.missingTools.length)
+    return (
+      <main className="grid min-h-screen content-center gap-4 px-8 pt-16 pb-8">
+        <h1 className="text-2xl tracking-tight">Install preview tools</h1>
+        <p>CloudSync needs {state.missingTools.join(", ")} before it can archive files.</p>
+        <p>Run this in Terminal, then quit and restart CloudSync:</p>
+        <code className="select-all rounded-lg bg-card p-4 text-sm">
+          brew install ffmpeg poppler webp
+        </code>
+        <Button
+          onClick={() => void navigator.clipboard.writeText("brew install ffmpeg poppler webp")}
+        >
+          Copy command
+        </Button>
+        <p className="text-sm text-muted-foreground">
+          Archiving is paused until the tools are installed.
+        </p>
+      </main>
+    )
+
   if (!state.authenticated) return <Login busy={busy} email={state.email} error={state.error} />
 
   return (

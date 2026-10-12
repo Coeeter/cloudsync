@@ -9,7 +9,12 @@ import {
 import { Array as Arr, Cause, Effect, Exit, Option, Predicate, Stream } from "effect"
 import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity"
 import { CloudSync, establishSession, logout } from "./rpc"
-import { collectDroppedFiles, type DroppedFile, uploadBrowserFile } from "./upload"
+import {
+  retryBrowserPreview,
+  collectDroppedFiles,
+  type DroppedFile,
+  uploadBrowserFile,
+} from "./upload"
 
 export const registry = AtomRegistry.make()
 
@@ -295,9 +300,9 @@ export const restoreAtom = catalogFn((id: string, client) => client("catalog.res
 export const deletePermanentlyAtom = catalogFn((id: string, client) =>
   client("catalog.deletePermanently", { id }),
 )
-export const retryPreviewAtom = catalogFn((id: string, client) =>
-  client("catalog.retryPreview", { id }),
-)
+export const retryPreviewAtom = CloudSync.runtime.fn((entry: Entry) => retryBrowserPreview(entry), {
+  reactivityKeys: catalogKeys,
+})
 
 export const downloadAtom = CloudSync.runtime.fn(
   (id: string) =>

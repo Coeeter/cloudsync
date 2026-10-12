@@ -1,0 +1,13 @@
+# Incremental cost estimate (2026-10-12)
+
+For a single-owner upload-and-view tool, expect the Cloudflare paid-plan floor of $5/month plus modest AWS ZIP/API/logging/temporary-storage usage. This is a workload estimate, not a guaranteed cap. Existing S3 originals and CloudFront delivery remain separately billed; their current storage/egress costs are not savings from this change.
+
+Cloudflare Workers Paid includes 10 million requests and 30 million CPU-ms monthly. D1 includes 5 GB storage, 25 billion rows read, and 50 million rows written monthly. The current 114 MB SQL catalog and roughly 75k entries fit easily; the rehearsal keeps historical job rows as well. Index writes and revision triggers count as writes. Search does an on-demand hierarchy query, not a periodic full rebuild; index-backed child lists/counts and direct-cover lookups avoid scanning the whole catalog during ordinary browsing. The five-minute maintenance cron is disabled for remote environments until authorized.
+
+Sources: [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/), [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/). Account-wide included usage may already be consumed by other projects.
+
+The official AWS Singapore Lambda Price List reports ARM compute at $0.0000133334 per GB-second for the initial tier and requests at $0.20/million. At 2 GB, a 30-second ZIP build is approximately $0.0008 of builder compute; 100 such ZIPs are about $0.08 before submission, API Gateway, S3 requests/storage and logs. A near-15-minute build is about $0.024. These are examples, not measured future job durations, and exclude account-wide free allowances.
+
+Source: [AWS regional Lambda Price List](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AWSLambda/current/ap-southeast-1/index.json), retrieved 2026-10-12. Lambda remains in the same region as S3, so original bytes need not cross into Cloudflare for ZIP creation. No ECR image, DynamoDB, preview queue or native server renderer is needed in the deployed design.
+
+API Gateway charges per submission; completed ZIPs remain reusable for seven days. Two small Lambda functions share one plain-JavaScript artifact, with one builder at a time. Resend remains the existing provider. Standard SSM parameter storage adds no parameter-storage charge; decrypt requests, logs and failure monitoring belong in the final deployment bill. Review scoped multipart/temporary-version retention before cutover: versioned S3 deletes alone do not reclaim older ZIP versions. Set monitoring from an owner-approved budget; no monthly cap has been agreed.

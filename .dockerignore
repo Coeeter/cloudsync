@@ -10,3 +10,7 @@
 docs
 infra
 apps/desktop/src
+**/.wrangler
+**/.dev.vars*
+**/dist-lambda
+**/*.sqlite*

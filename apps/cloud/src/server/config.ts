@@ -16,8 +16,8 @@ export type CloudFrontSigning =
 
 export interface CloudConfigShape {
   readonly nodeEnv: "development" | "test" | "production"
-  readonly databaseUrl: Redacted.Redacted<string>
-  readonly migrationsDir: string
+  readonly zipServiceUrl: string | null
+  readonly zipServiceSecret: Redacted.Redacted<string>
   readonly ownerEmail: string
   readonly sessionSecret: Redacted.Redacted<string>
   readonly publicUrl: string
@@ -38,10 +38,10 @@ const RawConfig = Config.all({
   nodeEnv: Config.Literals(["development", "test", "production"], "NODE_ENV").pipe(
     Config.withDefault("development"),
   ),
-  databaseUrl: Config.Redacted("DATABASE_URL"),
-  migrationsDir: Config.NonEmptyString("MIGRATIONS_DIR").pipe(
-    Config.withDefault("packages/db/drizzle"),
+  zipServiceUrl: Config.option(Config.NonEmptyString("ZIP_SERVICE_URL")).pipe(
+    Config.map(optionOrNull),
   ),
+  zipServiceSecret: Config.Redacted("ZIP_SERVICE_SECRET"),
   ownerEmail: Config.NonEmptyString("OWNER_EMAIL"),
   sessionSecret: Config.Redacted("SESSION_SECRET"),
   publicUrl: Config.NonEmptyString("PUBLIC_URL"),
@@ -112,8 +112,8 @@ export class CloudConfig extends Context.Service<CloudConfig, CloudConfigShape>(
 
       return CloudConfig.of({
         nodeEnv: raw.nodeEnv,
-        databaseUrl: raw.databaseUrl,
-        migrationsDir: raw.migrationsDir,
+        zipServiceUrl: raw.zipServiceUrl,
+        zipServiceSecret: raw.zipServiceSecret,
         ownerEmail: raw.ownerEmail,
         sessionSecret: raw.sessionSecret,
         publicUrl: raw.publicUrl,

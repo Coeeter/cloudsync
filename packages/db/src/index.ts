@@ -1,12 +1,17 @@
-import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js"
-import { migrate } from "drizzle-orm/postgres-js/migrator"
-import { Context, Effect, Layer, Redacted, Schema } from "effect"
-import postgres, { type Sql } from "postgres"
-import * as schema from "./schema"
+import { Context, Effect, Layer, Schema } from "effect"
 
-const MIGRATION_LOCK = 724_031_806
-
-export type CloudSyncDatabase = PostgresJsDatabase<typeof schema> & { $client: Sql }
+export interface D1PreparedStatement {
+  bind(...values: unknown[]): D1PreparedStatement
+  all<A>(): Promise<{ results: A[]; meta: { changes: number } }>
+  first<A>(): Promise<A | null>
+  run(): Promise<{ meta: { changes: number } }>
+}
+export interface D1Database {
+  prepare(sql: string): D1PreparedStatement
+  batch(statements: D1PreparedStatement[]): Promise<unknown[]>
+}
+export type SqlValue = string | number | null
+export type Statement = readonly [string, ...SqlValue[]]
 
 export class DatabaseError extends Schema.TaggedError<DatabaseError>()("DatabaseError", {
   reason: Schema.Literals(["unique", "foreign_key", "connection", "query"]),
@@ -14,95 +19,65 @@ export class DatabaseError extends Schema.TaggedError<DatabaseError>()("Database
   cause: Schema.Defect(),
 }) {}
 
+export class Sqlite {
+  constructor(readonly binding: D1Database) {}
+  prepare([sql, ...values]: Statement): D1PreparedStatement {
+    return this.binding.prepare(sql).bind(...values)
+  }
+  async all<A>(sql: string, ...values: SqlValue[]): Promise<A[]> {
+    return (await this.prepare([sql, ...values]).all<A>()).results
+  }
+  async first<A>(sql: string, ...values: SqlValue[]): Promise<A | null> {
+    return this.prepare([sql, ...values]).first<A>()
+  }
+  async run(sql: string, ...values: SqlValue[]): Promise<number> {
+    return (await this.prepare([sql, ...values]).run()).meta.changes
+  }
+  async batch(statements: readonly Statement[]): Promise<void> {
+    if (statements.length) await this.binding.batch(statements.map((s) => this.prepare(s)))
+  }
+  async revision(): Promise<number> {
+    return (
+      (await this.first<{ value: number }>("SELECT value FROM revision WHERE id=1"))?.value ?? 0
+    )
+  }
+  async commit(revision: number, statements: readonly Statement[]): Promise<void> {
+    await this.batch([
+      [
+        "INSERT INTO assertions(value) SELECT CASE WHEN value=? THEN 1 ELSE 0 END FROM revision WHERE id=1",
+        revision,
+      ],
+      ...statements,
+      ["DELETE FROM assertions"],
+    ])
+  }
+}
+
 export interface DatabaseShape {
+  readonly sql: Sqlite
   readonly execute: <A>(
     name: string,
-    operation: (database: CloudSyncDatabase) => Promise<A>,
-  ) => Effect.Effect<A, DatabaseError>
-  readonly transaction: <A>(
-    name: string,
-    operation: Parameters<CloudSyncDatabase["transaction"]>[0],
+    operation: (db: Sqlite) => Promise<A>,
   ) => Effect.Effect<A, DatabaseError>
 }
-
-function databaseError(cause: unknown): DatabaseError {
-  const nested = cause instanceof Error && cause.cause instanceof Error ? cause.cause : cause
-  let reason: DatabaseError["reason"] = "query"
-  if (nested instanceof postgres.PostgresError) {
-    if (nested.code === "23505") reason = "unique"
-    else if (nested.code === "23503") reason = "foreign_key"
-    else if (nested.code.startsWith("08")) reason = "connection"
-  } else if (
-    nested instanceof Error &&
-    "code" in nested &&
-    typeof nested.code === "string" &&
-    (nested.code === "ECONNREFUSED" || nested.code === "CONNECT_TIMEOUT")
-  ) {
-    reason = "connection"
-  }
-  return new DatabaseError({
-    reason,
-    message: nested instanceof Error ? nested.message : "Database operation failed",
-    cause,
-  })
-}
-
 export class Database extends Context.Service<Database, DatabaseShape>()("@cloudsync/db/Database") {
-  static layer(options: {
-    readonly connectionString: Redacted.Redacted<string>
-    readonly migrationsFolder?: string
-  }) {
-    return Layer.effect(
+  static layer(binding: D1Database) {
+    const db = new Sqlite(binding)
+    return Layer.succeed(
       Database,
-      Effect.gen(function* () {
-        const client = yield* Effect.acquireRelease(
-          Effect.sync(() =>
-            postgres(Redacted.value(options.connectionString), {
-              max: 10,
-              prepare: false,
-              connection: { client_min_messages: "warning" },
-            }),
-          ),
-          (sql) => Effect.promise(() => sql.end()),
-        )
-        const database = drizzle(client, { schema })
-        const db = Object.assign(database, { $client: client }) as CloudSyncDatabase
-        const execute: DatabaseShape["execute"] = (name, operation) =>
+      Database.of({
+        sql: db,
+        execute: (name, operation) =>
           Effect.tryPromise({
             try: () => operation(db),
-            catch: databaseError,
-          }).pipe(Effect.withSpan(`Database.${name}`))
-
-        if (options.migrationsFolder) {
-          yield* Effect.logInfo("Applying database migrations")
-          const migrationsFolder = options.migrationsFolder
-          // Web and worker start together; the advisory lock serialises their migrations.
-          yield* Effect.tryPromise({
-            try: async () => {
-              // A dedicated single connection so the session-scoped lock and the migration share it.
-              const session = postgres(Redacted.value(options.connectionString), {
-                max: 1,
-                prepare: false,
-                connection: { client_min_messages: "warning" },
-              })
-              try {
-                await session`select pg_advisory_lock(${MIGRATION_LOCK})`
-                await migrate(drizzle(session, { schema }), { migrationsFolder })
-              } finally {
-                await session.end()
-              }
-            },
-            catch: databaseError,
-          }).pipe(Effect.withSpan("Database.migrate"))
-        }
-
-        const transaction: DatabaseShape["transaction"] = (name, operation) =>
-          execute(name, (database) => database.transaction(operation) as Promise<never>)
-
-        return Database.of({ execute, transaction })
+            catch: (cause) =>
+              new DatabaseError({
+                reason: String(cause).includes("UNIQUE constraint") ? "unique" : "query",
+                message: "Database operation failed",
+                cause,
+              }),
+          }).pipe(Effect.withSpan(`Database.${name}`)),
       }),
     )
   }
 }
-
-export { schema }

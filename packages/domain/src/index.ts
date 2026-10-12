@@ -57,8 +57,16 @@ export class Session extends Schema.Class<Session>("Session")({
 
 export const PreviewManifest = Schema.Struct({
   version: Schema.Literal(1),
-  thumbnail: Schema.Struct({ size: Schema.Finite, checksumSha256: Schema.String }),
-  preview: Schema.Struct({ size: Schema.Finite, checksumSha256: Schema.String }),
+  thumbnail: Schema.Struct({
+    size: Schema.Finite,
+    checksumSha256: Schema.String,
+    mimeType: Schema.optional(Schema.Literals(["image/webp", "image/jpeg"])),
+  }),
+  preview: Schema.Struct({
+    size: Schema.Finite,
+    checksumSha256: Schema.String,
+    mimeType: Schema.optional(Schema.Literals(["image/webp", "image/jpeg"])),
+  }),
   isAnimated: Schema.NullOr(Schema.Boolean),
 })
 export type PreviewManifest = typeof PreviewManifest.Type
@@ -230,6 +238,11 @@ export const CloudSyncRpcs = RpcGroup.make(
       modifiedAt: Schema.String,
       previews: Schema.optional(PreviewManifest),
     },
+    success: UploadTicket,
+    error: CloudSyncError,
+  }),
+  Rpc.make("upload.beginPreview", {
+    payload: { ...SessionPayload, id: Schema.String, previews: PreviewManifest },
     success: UploadTicket,
     error: CloudSyncError,
   }),
