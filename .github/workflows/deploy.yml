@@ -122,7 +122,8 @@ jobs:
         run: |
           urls="$(jq -r 'select(.type == "deploy") | .targets[]?' "$RUNNER_TEMP/wrangler.ndjson")"
           test -n "$urls"
+          # A newly attached custom domain can take a minute or two to start serving.
           for url in $urls; do
-            curl --fail --silent --show-error --retry 5 --retry-all-errors --max-time 20 "$url/health"
+            curl --fail --silent --show-error --retry 12 --retry-delay 10 --retry-all-errors --max-time 20 "$url/health"
             echo
           done

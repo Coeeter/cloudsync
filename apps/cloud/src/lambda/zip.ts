@@ -67,7 +67,8 @@ async function callback(input: Submission, action: string, details: Record<strin
     body,
     signal: AbortSignal.timeout(20_000),
   })
-  if (response.status === 409) return null
+  // 404: the archive expired or was removed; 409: another builder holds it. Neither is retryable.
+  if (response.status === 404 || response.status === 409) return null
   if (!response.ok) throw new Error(`ZIP callback returned ${response.status}`)
   return (await response.json()) as { leaseToken?: string }
 }
