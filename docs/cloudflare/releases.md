@@ -3,7 +3,7 @@
 `.github/workflows/deploy.yml` follows another project's pattern: every push and pull request runs check/lint/test; a push to `main` then deploys automatically. There are no manual release dispatches, protected environments, artifact buckets or saved-plan approvals. Only `prod` is deployed; development runs locally with Wrangler.
 
 1. `zip` builds `dist-lambda/zip.mjs`, assumes the AWS deploy role through GitHub OIDC and runs `terraform apply` on `infra/terraform/zip`. It reads `ZIP_SERVICE_SECRET`, `S3_BUCKET` and `PUBLIC_URL` from Doppler individually. `doppler run` would also inject the Worker's AWS app keys over the role credentials. The secret goes into a write-only SSM parameter and stays out of state. The API Gateway URL becomes the job output.
-2. `worker` builds with `CLOUDFLARE_ENV=prod`, applies pending D1 migrations to `cloudsync-prod`, then deploys. Secrets ship in the same version through `--secrets-file`; `scripts/release/secrets.ts` selects the Worker's keys from Doppler. `ZIP_SERVICE_URL` is passed as a plain var from the `zip` output. The job then calls `/health` on each deployed URL. That route fails if configuration is invalid or the migrated schema is unreachable.
+2. `worker` builds with `CLOUDFLARE_ENV=prod`, applies pending D1 migrations to `cloudsync-prod`, then deploys. Secrets ship in the same version through `--secrets-file`; `scripts/release/secrets.ts` selects the Worker's keys from Doppler. `ZIP_SERVICE_URL` is passed as a plain var from the `zip` output.
 
 Schema migrations run on every deploy and must stay additive. The one-time PostgreSQL data import is a separate cutover step; see [cutover](cutover.md).
 

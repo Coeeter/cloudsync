@@ -132,6 +132,8 @@ export class Storage extends Context.Service<Storage, StorageShape>()("@cloudsyn
         send("head", async () => {
           const response = await client.fetch(objectUrl(objectKey), {
             method: "HEAD",
+            // Cloudflare turns cacheable HEAD requests into GETs, invalidating the S3 signature.
+            cache: "no-store",
             headers: { "x-amz-checksum-mode": "ENABLED" },
             signal: AbortSignal.timeout(20_000),
           })

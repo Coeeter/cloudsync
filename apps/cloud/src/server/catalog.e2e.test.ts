@@ -70,6 +70,51 @@ suite("Workers RPC with real local D1 and S3", () => {
     await localSql("DELETE FROM sessions WHERE id=?", [sessionId])
     await runtime.dispose()
   })
+  it("verifies uploaded client previews and allows replacing them", async () => {
+    const bytes = new Uint8Array([1, 2, 3])
+    const descriptor = {
+      size: bytes.length,
+      checksumSha256: createHash("sha256").update(bytes).digest("base64"),
+      mimeType: "image/webp" as const,
+    }
+    const previews = {
+      version: 1 as const,
+      thumbnail: descriptor,
+      preview: descriptor,
+      isAnimated: null,
+    }
+    const ticket = await call("upload.begin", {
+      parentId: root.id,
+      relativePath: "previews.png",
+      size: bytes.length,
+      mimeType: "image/png",
+      checksumSha256: descriptor.checksumSha256,
+      modifiedAt: new Date().toISOString(),
+      previews,
+    })
+    const put = async (target: typeof ticket) => {
+      expect(target.previews).toBeDefined()
+      if (!target.previews) throw new Error("Missing preview upload tickets")
+      for (const object of [target, target.previews.thumbnail, target.previews.preview]) {
+        const response = await fetch(object.url, {
+          method: "PUT",
+          headers: object.headers,
+          body: bytes,
+        })
+        expect(response.ok).toBe(true)
+      }
+    }
+    await put(ticket)
+    const entry = await call("upload.finalize", { uploadId: ticket.uploadId })
+    expect(entry.previewStatus).toBe("ready")
+    expect(entry.thumbnailUrl).toBeTruthy()
+    expect(entry.previewUrl).toBeTruthy()
+    const replacement = await call("upload.beginPreview", { id: entry.id, previews })
+    await put(replacement)
+    const replaced = await call("upload.finalize", { uploadId: replacement.uploadId })
+    expect(replaced.id).toBe(entry.id)
+    expect(replaced.previewStatus).toBe("ready")
+  })
   it("finalizes once and reserves concurrent sibling names", async () => {
     const results = await Promise.all(
       Array.from({ length: 6 }, () => upload(root.id, "Shared/photo2.dat")),

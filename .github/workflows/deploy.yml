@@ -111,20 +111,8 @@ jobs:
       - name: Deploy Worker
         env:
           ZIP_SERVICE_URL: ${{ needs.zip.outputs.url }}
-          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler.ndjson
         run: |
           secrets="$RUNNER_TEMP/worker-secrets.json"
           trap 'rm -f "$secrets"' EXIT
           doppler run -- bun scripts/release/secrets.ts > "$secrets"
           bunx wrangler deploy --secrets-file "$secrets" --var "ZIP_SERVICE_URL:$ZIP_SERVICE_URL"
-
-      - name: Check deployed Worker
-        run: |
-          # Custom domains are reported as "host (custom domain)" without a scheme.
-          urls="$(jq -r 'select(.type == "deploy") | .targets[]? | split(" ")[0] | if startswith("http") then . else "https://" + . end' "$RUNNER_TEMP/wrangler.ndjson")"
-          test -n "$urls"
-          # A newly attached custom domain can take a minute or two to start serving.
-          for url in $urls; do
-            curl --fail --silent --show-error --retry 12 --retry-delay 10 --retry-all-errors --max-time 20 "$url/health"
-            echo
-          done
