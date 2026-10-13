@@ -11,10 +11,9 @@
   "env": {
     "prod": {
       "name": "cloudsync",
-      "account_id": "00000000000000000000000000000000",
+      // The account ID and custom domain come from CI secrets; see docs/cloudflare/releases.md.
       // Keep the Worker URL available alongside the custom domain.
       "workers_dev": true,
-      "routes": [{"pattern": "sync.example.com", "custom_domain": true}],
       "triggers": {"crons": ["*/5 * * * *"]},
       "vars": {"NODE_ENV":"production"},
       "d1_databases": [{"binding":"DB","database_name":"cloudsync-prod","database_id":"c6936271-9153-4d71-b636-c37f3a135ee6","migrations_dir":"../../packages/db/migrations"}]

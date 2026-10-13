@@ -16,4 +16,4 @@ For authorized real-development CDN validation, scripts/validate-cloudfront-read
 
 Desktop previews use local ffmpeg, pdftoppm and cwebp. Missing tools block archiving at startup with `brew install ffmpeg poppler webp` and restart instructions. Finder Homebrew paths are checked explicitly. Preview conversion failure preserves the verified original and allows browser retry; it does not enqueue server rendering. Browser PDF support lazy-loads pdf.js; WebP is preferred with JPEG fallback.
 
-The macOS release remains `bun --filter @cloudsync/desktop package`. Replace the app only after owner authorization; preserve its user-data/Keychain session. Unfinished local validation must never use the production inbox or session as a fixture.
+The macOS release remains `bun --filter @cloudsync/desktop package`, with `MAIN_VITE_CLOUDSYNC_URL` set to the production URL so the packaged app has a default server. Replace the app only after owner authorization; preserve its user-data/Keychain session. Unfinished local validation must never use the production inbox or session as a fixture.

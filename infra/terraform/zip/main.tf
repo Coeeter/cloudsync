@@ -4,8 +4,8 @@ terraform {
     aws     = { source = "hashicorp/aws", version = "~> 6.0" }
     archive = { source = "hashicorp/archive", version = "~> 2.7" }
   }
+  # The bucket is supplied at init: terraform init -backend-config="bucket=..."
   backend "s3" {
-    bucket       = "cloudsync-terraform-123456789012"
     key          = "zip.tfstate"
     region       = "ap-southeast-1"
     use_lockfile = true

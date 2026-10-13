@@ -8,7 +8,8 @@ if (environment !== "dev" && environment !== "prod")
 const apply = process.argv.includes("--apply-dev")
 if (apply && environment !== "dev") throw new Error("Only development changes can be applied here")
 const project = "cloudsync"
-const distributionId = environment === "dev" ? "EDEVEXAMPLE000" : "EPRODEXAMPLE00"
+const distributionId = process.env.CLOUDFRONT_DISTRIBUTION_ID
+if (!distributionId) throw new Error(`Set CLOUDFRONT_DISTRIBUTION_ID to the ${environment} distribution`)
 const functionName = `${project}-download-response-${environment}`
 const directory = resolve(`tmp/cloudfront-reads/${environment}`)
 await mkdir(directory, { recursive: true })

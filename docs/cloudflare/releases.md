@@ -11,7 +11,7 @@ Schema migrations run on every deploy and must stay additive. The one-time Postg
 
 - AWS: with admin credentials, `terraform init && terraform apply` in `infra/terraform/bootstrap`. This creates the state bucket `cloudsync-terraform-123456789012`, the GitHub OIDC provider, and `cloudsync-github-deploy`, which only `main` of Coeeter/cloudsync can assume. Its local state is gitignored; the resources can be re-imported.
 - Doppler `cloudsync/prod`: add `ZIP_SERVICE_SECRET` (e.g. `openssl rand -hex 32`). Everything else the Worker needs already exists there.
-- GitHub repository secrets: `CLOUDFLARE_API_TOKEN` (Workers Scripts edit + D1 edit on the account; add Workers Routes edit on example.com before the domain switch) and `DOPPLER_TOKEN` (a read-only service token for `cloudsync/prod`). The account ID, D1 ID and role ARN are not secret; they are in `wrangler.jsonc` and the workflow.
+- GitHub repository secrets: `CLOUDFLARE_API_TOKEN` (Workers Scripts edit + D1 edit on the account; add Workers Routes edit on example.com before the domain switch) and `DOPPLER_TOKEN` (a read-only service token for `cloudsync/prod`). Deployment identifiers are kept out of the public repository and its logs as repository secrets: `AWS_DEPLOY_ROLE_ARN`, `TF_STATE_BUCKET`, `CLOUDFLARE_ACCOUNT_ID` and `WORKER_DOMAIN` (the custom domain passed to `wrangler deploy --domain`). The D1 ID stays in `wrangler.jsonc`; it is useless without an API token.
 - Delete the now-unused repository secrets `DOKPLOY_WEB_DEPLOY_URL` and `DOKPLOY_WORKER_DEPLOY_URL` once Dokploy is retired.
 
 Until this is done, the `zip` and `worker` jobs fail on `main`, and that failure is expected. Checks are unaffected.

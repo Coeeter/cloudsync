@@ -5,10 +5,16 @@ export interface DesktopConfigShape {
   readonly cloudUrl: string
 }
 
+// Packaged apps do not inherit a shell environment, so their default URL is baked in at
+// build time: MAIN_VITE_CLOUDSYNC_URL=https://... bun --filter @cloudsync/desktop package
+const defaultUrl: string | undefined = app.isPackaged
+  ? import.meta.env.MAIN_VITE_CLOUDSYNC_URL
+  : "http://localhost:3310"
+
+const cloudUrl = Config.NonEmptyString("CLOUDSYNC_URL")
+
 const RawConfig = Config.all({
-  cloudUrl: Config.NonEmptyString("CLOUDSYNC_URL").pipe(
-    Config.withDefault(app.isPackaged ? "https://sync.example.com" : "http://localhost:3310"),
-  ),
+  cloudUrl: defaultUrl ? cloudUrl.pipe(Config.withDefault(defaultUrl)) : cloudUrl,
 })
 
 export class DesktopConfig extends Context.Service<DesktopConfig, DesktopConfigShape>()(
