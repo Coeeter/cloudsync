@@ -585,14 +585,16 @@ function FileBrowser() {
           <span className="mr-auto text-sm text-muted-foreground" aria-live="polite">
             {selected.size ? `${selected.size} selected` : "Select files and folders"}
           </span>
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={selectingAll || bulkBusy || searchLoading}
-            onClick={() => void selectAll()}
-          >
-            {selectingAll ? "Selecting…" : "Select all"}
-          </Button>
+          {selected.size > 0 || selectingAll ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={selectingAll || bulkBusy || searchLoading}
+              onClick={() => void selectAll()}
+            >
+              {selectingAll ? "Selecting…" : "Select all"}
+            </Button>
+          ) : null}
           {selected.size > 0 ? (
             <>
               <Button variant="ghost" size="sm" disabled={bulkBusy} onClick={clearSelection}>

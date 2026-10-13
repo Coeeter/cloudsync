@@ -58,6 +58,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ap-southeast-1
+          mask-aws-account-id: true
       - run: bun install --frozen-lockfile
       - run: bun run --cwd apps/cloud build:lambda
 
@@ -87,8 +88,13 @@ jobs:
           TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
         run: |
           terraform init -input=false -backend-config="bucket=$TF_STATE_BUCKET"
-          terraform apply -auto-approve -input=false
-          echo "url=$(terraform output -raw zip_service_url)" >> "$GITHUB_OUTPUT"
+          terraform apply -auto-approve -input=false \
+            | sed -E 's#[a-z0-9]+\.execute-api\.[a-z0-9-]+\.amazonaws\.com#***.execute-api.amazonaws.com#g'
+          url="$(terraform output -raw zip_service_url)"
+          echo "::add-mask::$url"
+          # A masked value cannot be a job output, so hand the URL to the worker job encrypted.
+          sealed="$(printf %s "$url" | openssl enc -aes-256-cbc -pbkdf2 -a -A -pass env:TF_VAR_zip_service_secret)"
+          echo "url=$sealed" >> "$GITHUB_OUTPUT"
 
   worker:
     if: github.ref == 'refs/heads/main'
@@ -118,10 +124,15 @@ jobs:
 
       - name: Deploy Worker
         env:
-          ZIP_SERVICE_URL: ${{ needs.zip.outputs.url }}
+          ZIP_SERVICE_URL_SEALED: ${{ needs.zip.outputs.url }}
           WORKER_DOMAIN: ${{ secrets.WORKER_DOMAIN }}
         run: |
+          zip_secret="$(doppler secrets get ZIP_SERVICE_SECRET --plain)"
+          echo "::add-mask::$zip_secret"
+          zip_url="$(printf %s "$ZIP_SERVICE_URL_SEALED" | ZIP_SECRET="$zip_secret" openssl enc -d -aes-256-cbc -pbkdf2 -a -A -pass env:ZIP_SECRET)"
+          echo "::add-mask::$zip_url"
           secrets="$RUNNER_TEMP/worker-secrets.json"
           trap 'rm -f "$secrets"' EXIT
           doppler run -- bun scripts/release/secrets.ts > "$secrets"
-          bunx wrangler deploy --secrets-file "$secrets" --var "ZIP_SERVICE_URL:$ZIP_SERVICE_URL" --domain "$WORKER_DOMAIN"
+          bunx wrangler deploy --secrets-file "$secrets" --var "ZIP_SERVICE_URL:$zip_url" --domain "$WORKER_DOMAIN" 2>&1 \
+            | sed -E 's#[A-Za-z0-9-]+\.[A-Za-z0-9-]+\.workers\.dev#***.workers.dev#g'
