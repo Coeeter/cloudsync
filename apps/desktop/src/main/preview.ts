@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process"
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { promisify } from "node:util"
@@ -26,7 +26,7 @@ export interface LocalPreviews {
 }
 
 export async function createLocalPreviews(
-  original: Uint8Array,
+  input: string,
   mimeType: string,
   signal?: AbortSignal,
 ): Promise<LocalPreviews | null> {
@@ -34,9 +34,7 @@ export async function createLocalPreviews(
   if (kind === "none") return null
   const directory = await mkdtemp(join(tmpdir(), "cloudsync-preview-"))
   try {
-    const input = join(directory, "input")
     const frame = join(directory, "frame.png")
-    await writeFile(input, original)
     const options = { signal, timeout: 60_000, maxBuffer: 1024 * 1024 }
     if (kind === "pdf") {
       await execute(
@@ -117,7 +115,7 @@ export async function createLocalPreviews(
         version: previewSettings.version,
         thumbnail: descriptor(thumbnail),
         preview: descriptor(preview),
-        isAnimated: mimeType === "image/webp" ? isAnimatedWebP(original) : null,
+        isAnimated: mimeType === "image/webp" ? isAnimatedWebP(await readFile(input)) : null,
       },
     }
   } finally {

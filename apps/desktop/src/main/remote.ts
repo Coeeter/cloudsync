@@ -6,7 +6,8 @@ import {
   type UploadTicket,
   type ObjectUploadTicket,
 } from "@cloudsync/domain"
-import { Context, Effect, Layer, Schema } from "effect"
+import { NodeHttpClient } from "@effect/platform-node"
+import { Context, Effect, FileSystem, Layer, Schema } from "effect"
 import {
   FetchHttpClient,
   HttpClient,
@@ -31,7 +32,10 @@ export interface RemoteShape {
     token: string,
     upload: PreparedUpload,
   ) => Effect.Effect<UploadTicket, RemoteError>
-  readonly put: (ticket: ObjectUploadTicket, bytes: Uint8Array) => Effect.Effect<void, RemoteError>
+  readonly put: (
+    ticket: ObjectUploadTicket,
+    body: Uint8Array | { readonly path: string },
+  ) => Effect.Effect<void, RemoteError>
   readonly finalize: (token: string, uploadId: string) => Effect.Effect<Entry, RemoteError>
 }
 
@@ -53,6 +57,7 @@ export class Remote extends Context.Service<Remote, RemoteShape>()("@cloudsync/d
     Remote,
     Effect.gen(function* () {
       const config = yield* DesktopConfig
+      const fileSystem = yield* FileSystem.FileSystem
       const protocol = RpcClient.layerProtocolHttp({ url: `${config.cloudUrl}/rpc` }).pipe(
         Layer.provide([FetchHttpClient.layer, RpcSerialization.layerJson]),
       )
@@ -81,24 +86,32 @@ export class Remote extends Context.Service<Remote, RemoteShape>()("@cloudsync/d
         call("beginUpload", (client) => client["upload.begin"]({ sessionToken, ...upload }))
       const finalize: RemoteShape["finalize"] = (sessionToken, uploadId) =>
         call("finalizeUpload", (client) => client["upload.finalize"]({ sessionToken, uploadId }))
-      const put: RemoteShape["put"] = (ticket, bytes) =>
+      // Originals stream from disk so large videos are never held in memory. Presigned S3 PUTs
+      // reject chunked bodies, and node:http sends the exact Content-Length that bodyFile sets.
+      const put: RemoteShape["put"] = (ticket, body) =>
         Effect.gen(function* () {
           const client = yield* HttpClient.HttpClient
-          const request = HttpClientRequest.put(ticket.url).pipe(
-            HttpClientRequest.bodyUint8Array(bytes),
-            HttpClientRequest.setHeaders(ticket.headers),
+          const request = HttpClientRequest.put(ticket.url)
+          const withBody =
+            body instanceof Uint8Array
+              ? HttpClientRequest.bodyUint8Array(request, body)
+              : yield* HttpClientRequest.bodyFile(request, body.path)
+          const response = yield* client.execute(
+            HttpClientRequest.setHeaders(withBody, ticket.headers),
           )
-          const response = yield* client.execute(request)
           yield* HttpClientResponse.filterStatusOk(response)
         }).pipe(
-          Effect.provide(FetchHttpClient.layer),
+          Effect.provide(NodeHttpClient.layerNodeHttp),
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.scoped,
           Effect.mapError((cause) =>
             remoteError("uploadBytes")(
               new Error(
-                cause.response
+                "response" in cause && cause.response
                   ? `Storage rejected the upload (HTTP ${cause.response.status})`
-                  : "Could not reach storage",
+                  : cause._tag === "PlatformError"
+                    ? "Could not read the file"
+                    : "Could not reach storage",
               ),
             ),
           ),

@@ -71,6 +71,8 @@ function mimeFor(path: string): string {
 }
 
 const CONCURRENCY = 6
+// S3's limit for a single PUT; larger files would need a multipart upload.
+const MAX_SINGLE_UPLOAD_BYTES = 5 * 1024 ** 3
 
 export class Inbox extends Context.Service<Inbox, InboxShape>()("@cloudsync/desktop/Inbox") {
   static readonly layer = Layer.effect(
@@ -168,12 +170,14 @@ export class Inbox extends Context.Service<Inbox, InboxShape>()("@cloudsync/desk
             queue.set(path, stable.size)
             return
           }
-          const bytes = yield* fileSystem
-            .readFile(path)
-            .pipe(Effect.mapError(inboxError(`Could not read ${relativePath}`)))
+          if (stable.size > MAX_SINGLE_UPLOAD_BYTES)
+            return yield* new InboxError({
+              message: `${relativePath} is larger than 5 GB, which CloudSync cannot upload yet`,
+              cause: null,
+            })
           const mimeType = mimeFor(path)
           const previews = yield* Effect.tryPromise({
-            try: (signal) => createLocalPreviews(bytes, mimeType, signal),
+            try: (signal) => createLocalPreviews(path, mimeType, signal),
             catch: (cause) => inboxError("Local preview generation failed")(cause),
           }).pipe(
             Effect.tapError(() =>
@@ -195,7 +199,7 @@ export class Inbox extends Context.Service<Inbox, InboxShape>()("@cloudsync/desk
               begin: (upload) => remote.begin(sessionToken, upload),
               put: (ticket) =>
                 Effect.gen(function* () {
-                  yield* remote.put(ticket, bytes)
+                  yield* remote.put(ticket, { path })
                   if (previews && ticket.previews) {
                     yield* Effect.all(
                       [
