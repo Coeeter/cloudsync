@@ -116,14 +116,6 @@ export const maintenance = Effect.gen(function* () {
       )
   }
   yield* database.execute("maintenance.metadata", (db) =>
-    db.batch([
-      ["DELETE FROM entries WHERE deleting=1"],
-      ["DELETE FROM sessions WHERE expiresAt<?", now()],
-      [
-        "DELETE FROM auth_pins WHERE expiresAt<? AND createdAt<?",
-        now(),
-        new Date(Date.now() - 15 * 60_000).toISOString(),
-      ],
-    ]),
+    db.run("DELETE FROM entries WHERE deleting=1"),
   )
 })

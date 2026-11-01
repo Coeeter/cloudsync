@@ -27,10 +27,6 @@ const queries: Record<keyof typeof TABLE_FILES, string> = {
   uploads: `select id, parent_id, relative_path, object_key, size::text as size, mime_type, checksum_sha256,
     preview_manifest::text as preview_manifest, ${ts("modified_at")}, status, error, entry_id,
     ${ts("expires_at")}, ${ts("created_at")}, ${ts("updated_at")} from uploads order by id`,
-  pins: `select id, email, code_hash, attempts, ${ts("expires_at")}, ${ts("consumed_at")}, ${ts("created_at")}
-    from auth_pins order by id`,
-  sessions: `select id, email, token_hash, ${ts("expires_at")}, ${ts("last_seen_at")}, ${ts("created_at")}
-    from sessions order by id`,
   jobs: `select id, kind, payload::text as payload, status, attempts, ${ts("run_after")}, ${ts("locked_at")},
     error, ${ts("created_at")}, ${ts("updated_at")} from jobs order by id`,
   rateLimits: `select key, ${ts("window_started_at")}, count from rate_limits order by key, window_started_at`,

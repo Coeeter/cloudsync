@@ -24,7 +24,4 @@ const postJson = (url: string, body: object) =>
     yield* HttpClientResponse.filterStatusOk(response)
   }).pipe(Effect.provide(FetchHttpClient.layer), Effect.scoped)
 
-export const establishSession = (token: string | undefined) =>
-  postJson("/auth/establish", token ? { token } : {})
-
-export const logout = postJson("/auth/logout", {})
+export const refreshViewerCookies = postJson("/auth/viewer", {})

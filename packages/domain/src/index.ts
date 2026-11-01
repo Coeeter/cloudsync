@@ -52,7 +52,6 @@ export class DirectoryListing extends Schema.Class<DirectoryListing>("DirectoryL
 export class Session extends Schema.Class<Session>("Session")({
   email: Schema.String,
   expiresAt: Schema.String,
-  token: Schema.optional(Schema.String),
 }) {}
 
 export const PreviewManifest = Schema.Struct({
@@ -123,37 +122,18 @@ export class CloudSyncError extends Schema.TaggedError<CloudSyncError>()("CloudS
     "CONFLICT",
     "INVALID_INPUT",
     "UPLOAD_INCOMPLETE",
-    "RATE_LIMITED",
     "INTERNAL",
   ]),
   message: Schema.String,
 }) {}
 
-const SessionPayload = { sessionToken: Schema.optional(Schema.String) }
-
 export const CloudSyncRpcs = RpcGroup.make(
-  Rpc.make("auth.requestPin", {
-    payload: { email: Schema.String },
-    success: Ok,
-    error: CloudSyncError,
-  }),
-  Rpc.make("auth.verifyPin", {
-    payload: {
-      email: Schema.String,
-      code: Schema.String,
-      client: Schema.Literals(["web", "desktop"]),
-    },
-    success: Session,
-    error: CloudSyncError,
-  }),
   Rpc.make("auth.session", {
-    payload: SessionPayload,
     success: Session,
     error: CloudSyncError,
   }),
   Rpc.make("catalog.list", {
     payload: {
-      ...SessionPayload,
       parentId: Schema.NullOr(Schema.String),
       cursor: Schema.optional(Schema.String),
       limit: Schema.optional(Schema.Finite),
@@ -163,13 +143,12 @@ export const CloudSyncRpcs = RpcGroup.make(
     error: CloudSyncError,
   }),
   Rpc.make("catalog.search", {
-    payload: { ...SessionPayload, query: Schema.String, limit: Schema.optional(Schema.Finite) },
+    payload: { query: Schema.String, limit: Schema.optional(Schema.Finite) },
     success: SearchResponse,
     error: CloudSyncError,
   }),
   Rpc.make("catalog.selectionIds", {
     payload: {
-      ...SessionPayload,
       parentId: Schema.NullOr(Schema.String),
       query: Schema.optional(Schema.String),
       trashed: Schema.optional(Schema.Boolean),
@@ -179,7 +158,6 @@ export const CloudSyncRpcs = RpcGroup.make(
   }),
   Rpc.make("catalog.bulk", {
     payload: {
-      ...SessionPayload,
       ids: Schema.Array(Schema.String),
       action: BulkAction,
       parentId: Schema.optional(Schema.NullOr(Schema.String)),
@@ -188,48 +166,46 @@ export const CloudSyncRpcs = RpcGroup.make(
     error: CloudSyncError,
   }),
   Rpc.make("catalog.retryPreview", {
-    payload: { ...SessionPayload, id: Schema.String },
+    payload: { id: Schema.String },
     success: Ok,
     error: CloudSyncError,
   }),
   Rpc.make("catalog.createFolder", {
-    payload: { ...SessionPayload, parentId: Schema.NullOr(Schema.String), name: Schema.String },
+    payload: { parentId: Schema.NullOr(Schema.String), name: Schema.String },
     success: Entry,
     error: CloudSyncError,
   }),
   Rpc.make("catalog.rename", {
-    payload: { ...SessionPayload, id: Schema.String, name: Schema.String },
+    payload: { id: Schema.String, name: Schema.String },
     success: Entry,
     error: CloudSyncError,
   }),
   Rpc.make("catalog.move", {
-    payload: { ...SessionPayload, id: Schema.String, parentId: Schema.NullOr(Schema.String) },
+    payload: { id: Schema.String, parentId: Schema.NullOr(Schema.String) },
     success: Entry,
     error: CloudSyncError,
   }),
   Rpc.make("catalog.trash", {
-    payload: { ...SessionPayload, id: Schema.String },
+    payload: { id: Schema.String },
     success: Ok,
     error: CloudSyncError,
   }),
   Rpc.make("catalog.recycleBin", {
-    payload: SessionPayload,
     success: Schema.Array(Entry),
     error: CloudSyncError,
   }),
   Rpc.make("catalog.restore", {
-    payload: { ...SessionPayload, id: Schema.String },
+    payload: { id: Schema.String },
     success: Entry,
     error: CloudSyncError,
   }),
   Rpc.make("catalog.deletePermanently", {
-    payload: { ...SessionPayload, id: Schema.String },
+    payload: { id: Schema.String },
     success: Ok,
     error: CloudSyncError,
   }),
   Rpc.make("upload.begin", {
     payload: {
-      ...SessionPayload,
       parentId: Schema.NullOr(Schema.String),
       relativePath: Schema.String,
       size: Schema.Finite,
@@ -242,27 +218,27 @@ export const CloudSyncRpcs = RpcGroup.make(
     error: CloudSyncError,
   }),
   Rpc.make("upload.beginPreview", {
-    payload: { ...SessionPayload, id: Schema.String, previews: PreviewManifest },
+    payload: { id: Schema.String, previews: PreviewManifest },
     success: UploadTicket,
     error: CloudSyncError,
   }),
   Rpc.make("upload.finalize", {
-    payload: { ...SessionPayload, uploadId: Schema.String },
+    payload: { uploadId: Schema.String },
     success: Entry,
     error: CloudSyncError,
   }),
   Rpc.make("download.file", {
-    payload: { ...SessionPayload, id: Schema.String },
+    payload: { id: Schema.String },
     success: DownloadTicket,
     error: CloudSyncError,
   }),
   Rpc.make("download.archive", {
-    payload: { ...SessionPayload, ids: Schema.Array(Schema.String) },
+    payload: { ids: Schema.Array(Schema.String) },
     success: ArchiveDownload,
     error: CloudSyncError,
   }),
   Rpc.make("download.status", {
-    payload: { ...SessionPayload, id: Schema.String },
+    payload: { id: Schema.String },
     success: ArchiveDownload,
     error: CloudSyncError,
   }),

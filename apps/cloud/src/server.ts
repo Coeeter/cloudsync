@@ -16,8 +16,9 @@ const entry = createServerEntry({
 
     if (
       path === "/rpc" ||
-      path === "/auth/establish" ||
+      path === "/auth/viewer" ||
       path === "/auth/logout" ||
+      path === "/auth/desktop" ||
       path === "/health" ||
       path === "/internal/zip"
     ) {

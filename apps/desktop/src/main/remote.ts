@@ -3,15 +3,17 @@ import {
   CloudSyncError,
   CloudSyncRpcs,
   type Entry,
+  type Session,
   type UploadTicket,
   type ObjectUploadTicket,
 } from "@cloudsync/domain"
 import { NodeHttpClient } from "@effect/platform-node"
 import { Context, Effect, FileSystem, Layer, Schedule, Schema } from "effect"
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
-import { RpcClient, type RpcClientError, RpcSerialization } from "effect/unstable/rpc"
+import { HttpClient, HttpClientRequest } from "effect/unstable/http"
+import { RpcClient, type RpcClientError } from "effect/unstable/rpc"
 import { DesktopConfig } from "./config"
-import { describe } from "./describe-error"
+import { describe, httpStatus } from "./describe-error"
+import { cloudRpcProtocol } from "./rpc-protocol"
 
 export class RemoteError extends Schema.TaggedError<RemoteError>()("RemoteError", {
   operation: Schema.String,
@@ -21,9 +23,7 @@ export class RemoteError extends Schema.TaggedError<RemoteError>()("RemoteError"
 }) {}
 
 export interface RemoteShape {
-  readonly requestPin: (email: string) => Effect.Effect<void, RemoteError>
-  readonly verifyPin: (email: string, code: string) => Effect.Effect<string, RemoteError>
-  readonly authenticate: (token: string) => Effect.Effect<void, RemoteError>
+  readonly authenticate: (token: string) => Effect.Effect<Session, RemoteError>
   readonly begin: (
     token: string,
     upload: PreparedUpload,
@@ -37,13 +37,21 @@ export interface RemoteShape {
 
 type CloudClient = RpcClient.FromGroup<typeof CloudSyncRpcs, RpcClientError.RpcClientError>
 
+// Access answers a missing or expired token at the edge with a redirect to its login page,
+// before the Worker can return an UNAUTHORIZED RPC error.
+const rejectedByAccess = (cause: unknown) => [302, 401, 403].includes(httpStatus(cause) ?? 0)
+
 const remoteError = (operation: string) => (cause: unknown) =>
   new RemoteError({
     operation,
     message: Schema.is(CloudSyncError)(cause)
       ? cause.message
-      : describe(cause) || `Cloud ${operation} failed`,
-    unauthorized: Schema.is(CloudSyncError)(cause) && cause.code === "UNAUTHORIZED",
+      : rejectedByAccess(cause)
+        ? "Your sign-in has expired"
+        : describe(cause) || `Cloud ${operation} failed`,
+    unauthorized:
+      (Schema.is(CloudSyncError)(cause) && cause.code === "UNAUTHORIZED") ||
+      rejectedByAccess(cause),
     cause,
   })
 
@@ -53,30 +61,15 @@ export class Remote extends Context.Service<Remote, RemoteShape>()("@cloudsync/d
     Effect.gen(function* () {
       const config = yield* DesktopConfig
       const fileSystem = yield* FileSystem.FileSystem
-      const protocol = RpcClient.layerProtocolHttp({ url: `${config.cloudUrl}/rpc` }).pipe(
-        Layer.provide([FetchHttpClient.layer, RpcSerialization.layerJson]),
-      )
+      const protocol = cloudRpcProtocol(config.cloudUrl)
+      const signedIn = (token: string) => ({ headers: { "cf-access-token": token } })
       const call = <A, E>(operation: string, use: (client: CloudClient) => Effect.Effect<A, E>) =>
         Effect.scoped(
           RpcClient.make(CloudSyncRpcs).pipe(Effect.flatMap(use), Effect.provide(protocol)),
         ).pipe(Effect.mapError(remoteError(operation)))
 
-      const requestPin: RemoteShape["requestPin"] = (email) =>
-        call("requestPin", (client) => client["auth.requestPin"]({ email })).pipe(Effect.asVoid)
-      const verifyPin: RemoteShape["verifyPin"] = (email, code) =>
-        call("verifyPin", (client) =>
-          client["auth.verifyPin"]({ email, code, client: "desktop" }),
-        ).pipe(
-          Effect.flatMap((session) =>
-            session.token
-              ? Effect.succeed(session.token as string)
-              : Effect.fail(remoteError("verifyPin")(new Error("Server did not return a session"))),
-          ),
-        )
-      const authenticate: RemoteShape["authenticate"] = (sessionToken) =>
-        call("authenticate", (client) => client["auth.session"]({ sessionToken })).pipe(
-          Effect.asVoid,
-        )
+      const authenticate: RemoteShape["authenticate"] = (token) =>
+        call("authenticate", (client) => client["auth.session"](undefined, signedIn(token)))
       // A saturated uplink occasionally times out new connections to Cloudflare. Retrying just
       // the RPC keeps that from restarting a multi-gigabyte upload; finalize is idempotent.
       const retryTransport = <A>(effect: Effect.Effect<A, RemoteError>) =>
@@ -84,16 +77,18 @@ export class Remote extends Context.Service<Remote, RemoteShape>()("@cloudsync/d
           Effect.retry({
             times: 6,
             schedule: Schedule.exponential("1 second"),
-            while: (error) => !Schema.is(CloudSyncError)(error.cause),
+            while: (error) => !error.unauthorized && !Schema.is(CloudSyncError)(error.cause),
           }),
         )
-      const begin: RemoteShape["begin"] = (sessionToken, upload) =>
+      const begin: RemoteShape["begin"] = (token, upload) =>
         retryTransport(
-          call("beginUpload", (client) => client["upload.begin"]({ sessionToken, ...upload })),
+          call("beginUpload", (client) => client["upload.begin"](upload, signedIn(token))),
         )
-      const finalize: RemoteShape["finalize"] = (sessionToken, uploadId) =>
+      const finalize: RemoteShape["finalize"] = (token, uploadId) =>
         retryTransport(
-          call("finalizeUpload", (client) => client["upload.finalize"]({ sessionToken, uploadId })),
+          call("finalizeUpload", (client) =>
+            client["upload.finalize"]({ uploadId }, signedIn(token)),
+          ),
         )
       // Originals stream from disk so large videos are never held in memory. Presigned S3 PUTs
       // reject chunked bodies, and node:http sends the exact Content-Length that bodyFile sets.
@@ -129,7 +124,7 @@ export class Remote extends Context.Service<Remote, RemoteShape>()("@cloudsync/d
           }),
         )
 
-      return Remote.of({ requestPin, verifyPin, authenticate, begin, put, finalize })
+      return Remote.of({ authenticate, begin, put, finalize })
     }),
   )
 }

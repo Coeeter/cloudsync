@@ -32,12 +32,12 @@
     "archiver": "8.0.0",
     "aws4fetch": "1.0.20",
     "effect": "4.0.0-rc.117",
+    "jose": "6.2.13",
     "lucide-react": "0.544.0",
     "pdfjs-dist": "6.4.299",
     "postgres": "3.4.9",
     "react": "19.2.0",
-    "react-dom": "19.2.0",
-    "resend": "6.30.0"
+    "react-dom": "19.2.0"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.62.5",

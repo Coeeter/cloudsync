@@ -40,8 +40,6 @@ function compare(table: string, records: Record<string, unknown>[], ignored: str
 try {
   compare("entries", source.entries as unknown as Record<string, unknown>[])
   compare("uploads", source.uploads as unknown as Record<string, unknown>[])
-  compare("sessions", source.sessions as unknown as Record<string, unknown>[])
-  compare("auth_pins", source.pins as unknown as Record<string, unknown>[])
   compare("archives", source.archives as unknown as Record<string, unknown>[], [
     "fingerprint",
     "manifest",

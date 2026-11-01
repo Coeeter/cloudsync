@@ -14,7 +14,7 @@ import {
   Stream,
 } from "effect"
 import { Notification } from "electron"
-import { Remote } from "./remote"
+import { Remote, RemoteError } from "./remote"
 import { SizeQueue } from "./size-queue"
 import { createLocalPreviews } from "./preview"
 
@@ -24,6 +24,7 @@ export interface InboxSnapshot {
   readonly active: ReadonlyArray<string>
   readonly failed: ReadonlyArray<{ readonly path: string; readonly message: string }>
   readonly uploaded: number
+  readonly signInExpired: boolean
 }
 
 export class InboxError extends Schema.TaggedError<InboxError>()("InboxError", {
@@ -86,6 +87,7 @@ export class Inbox extends Context.Service<Inbox, InboxShape>()("@cloudsync/desk
       let root: string | null = null
       let token: string | null = null
       let uploaded = 0
+      let signInExpired = false
       const active = new Set<string>()
       const queue = new SizeQueue()
       const failed = new Map<string, { readonly message: string; readonly size: number }>()
@@ -98,6 +100,7 @@ export class Inbox extends Context.Service<Inbox, InboxShape>()("@cloudsync/desk
         pending: queue.size,
         active: Array.from(active),
         failed: Array.from(failed, ([path, { message }]) => ({ path, message })),
+        signInExpired,
         uploaded,
       })
       const publish = () => {
@@ -274,7 +277,13 @@ export class Inbox extends Context.Service<Inbox, InboxShape>()("@cloudsync/desk
               ? String(cause.message)
               : "Upload failed"
           failed.set(path, { message, size })
-          notifyFailure()
+          if (
+            Schema.is(InboxError)(cause) &&
+            Schema.is(RemoteError)(cause.cause) &&
+            cause.cause.unauthorized
+          )
+            signInExpired = true
+          else notifyFailure()
         }
       }
 
@@ -304,6 +313,7 @@ export class Inbox extends Context.Service<Inbox, InboxShape>()("@cloudsync/desk
         watcher = null
         root = null
         token = null
+        signInExpired = false
         queue.clear()
         publish()
       })

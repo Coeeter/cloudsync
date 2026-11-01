@@ -2,6 +2,7 @@ import { join } from "node:path"
 import { NodeServices } from "@effect/platform-node"
 import { Effect, Layer, ManagedRuntime } from "effect"
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from "electron"
+import { browserSignIn } from "./browser-sign-in"
 import { DesktopConfig } from "./config"
 import { Inbox, type InboxSnapshot } from "./inbox"
 import { missingPreviewTools } from "./preview"
@@ -31,6 +32,7 @@ let token: string | null = null
 let error: string | null = null
 let cloudUrl = ""
 let missingTools: string[] = []
+let pendingSignIn: AbortController | null = null
 
 const message = (cause: unknown): string => {
   if (typeof cause === "object" && cause !== null && "message" in cause) {
@@ -79,6 +81,12 @@ const startInbox = () =>
       yield* inbox.start(settings.inbox, token)
     }),
   )
+
+const signOut = async () => {
+  token = null
+  await runtime.runPromise(Effect.flatMap(Inbox, (inbox) => inbox.stop))
+  await persist({ ...settings, encryptedToken: null })
+}
 
 // IPC rejections surface in the renderer as opaque "Error invoking remote method" strings,
 // so failures are reported through the published snapshot instead.
@@ -160,29 +168,31 @@ async function showWindow() {
 
 function registerIpc() {
   ipcMain.handle("cloudsync:state", () => snapshot())
-  handle("cloudsync:requestPin", async (email: string) => {
-    const trimmed = email.trim()
-    await runtime.runPromise(Effect.flatMap(Remote, (remote) => remote.requestPin(trimmed)))
-    await persist({ ...settings, email: trimmed })
+  handle("cloudsync:signIn", async () => {
+    pendingSignIn?.abort()
+    const controller = new AbortController()
+    pendingSignIn = controller
+    try {
+      const next = await browserSignIn(
+        cloudUrl,
+        (url) => shell.openExternal(url),
+        AbortSignal.any([controller.signal, AbortSignal.timeout(10 * 60_000)]),
+      )
+      const session = await runtime.runPromise(
+        Effect.flatMap(Remote, (remote) => remote.authenticate(next)),
+      )
+      const encryptedToken = await runtime.runPromise(
+        Effect.flatMap(DesktopStore, (store) => store.encryptToken(next)),
+      )
+      await persist({ ...settings, email: session.email, encryptedToken })
+      token = next
+      await startInbox()
+      await showWindow()
+    } finally {
+      if (pendingSignIn === controller) pendingSignIn = null
+    }
   })
-  handle("cloudsync:verifyPin", async (code: string) => {
-    if (!settings.email) throw new Error("Enter your email first")
-    const email = settings.email
-    const next = await runtime.runPromise(
-      Effect.flatMap(Remote, (remote) => remote.verifyPin(email, code)),
-    )
-    const encryptedToken = await runtime.runPromise(
-      Effect.flatMap(DesktopStore, (store) => store.encryptToken(next)),
-    )
-    await persist({ ...settings, encryptedToken })
-    token = next
-    await startInbox()
-  })
-  handle("cloudsync:signOut", async () => {
-    await runtime.runPromise(Effect.flatMap(Inbox, (inbox) => inbox.stop))
-    token = null
-    await persist({ ...settings, encryptedToken: null })
-  })
+  handle("cloudsync:signOut", signOut)
   handle("cloudsync:chooseFolder", async () => {
     const options = {
       title: "Choose the CloudSync inbox",
@@ -220,6 +230,9 @@ async function bootstrap() {
   if (saved && !missingTools.length) {
     const verdict = await runtime.runPromise(
       Effect.flatMap(Remote, (remote) => remote.authenticate(saved)).pipe(
+        Effect.tap((session) =>
+          Effect.sync(() => (settings = { ...settings, email: session.email })),
+        ),
         Effect.as("valid" as const),
         Effect.catch((cause) =>
           Effect.succeed(cause.unauthorized ? ("rejected" as const) : ("offline" as const)),
@@ -233,7 +246,16 @@ async function bootstrap() {
   if (encrypted && !token && !missingTools.length)
     await persist({ ...settings, encryptedToken: null })
   registerIpc()
-  await runtime.runPromise(Effect.map(Inbox, (inbox) => inbox.subscribe(() => void publish())))
+  await runtime.runPromise(
+    Effect.map(Inbox, (inbox) =>
+      inbox.subscribe((state) => {
+        if (state.signInExpired && token) {
+          error = "Your sign-in has expired. Sign in again to keep archiving."
+          void signOut().then(publish)
+        } else void publish()
+      }),
+    ),
+  )
 
   const resources = app.isPackaged
     ? process.resourcesPath

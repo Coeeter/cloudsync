@@ -19,8 +19,9 @@ previews and manages the archive.
   origins and no object is ever publicly addressable.
 - **Folder downloads** are streamed ZIP archives built by an AWS Lambda
   (`infra/terraform/zip`), so archive size never depends on server disk.
-- **Sign-in** is a single-use email PIN for one configured address; the desktop app
-  keeps its session in the macOS Keychain.
+- **Sign-in** is Cloudflare Access in front of the whole app, allowing one email. The
+  Worker verifies the Access JWT on every request. The desktop app signs in through the
+  system browser with a loopback redirect and keeps the Access token in the macOS Keychain.
 
 Physical S3 keys are immutable and independent of logical paths, so renames, moves
 and restores are catalog-only operations, and upload finalisation is idempotent.

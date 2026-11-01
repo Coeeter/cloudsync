@@ -1,9 +1,9 @@
 // Selects only the Worker's keys from the Doppler environment for `wrangler deploy --secrets-file`.
 // ZIP_SERVICE_URL is not a secret; the deploy passes it from the Terraform output.
 const names = [
-  "OWNER_EMAIL",
-  "SESSION_SECRET",
   "PUBLIC_URL",
+  "ACCESS_TEAM_DOMAIN",
+  "ACCESS_AUD",
   "AWS_REGION",
   "AWS_ACCESS_KEY_ID",
   "AWS_SECRET_ACCESS_KEY",
@@ -13,8 +13,6 @@ const names = [
   "CLOUDFRONT_COOKIE_DOMAIN",
   "CLOUDFRONT_KEY_PAIR_ID",
   "CLOUDFRONT_PRIVATE_KEY_BASE64",
-  "RESEND_API_KEY",
-  "RESEND_FROM",
   "ZIP_SERVICE_SECRET",
 ]
 if (process.stdout.isTTY) throw new Error("Redirect the secret payload to a file")

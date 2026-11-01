@@ -1,21 +1,8 @@
 import { chromium } from "playwright"
-import { createHash, randomUUID } from "node:crypto"
+import { randomUUID } from "node:crypto"
 import { readFile } from "node:fs/promises"
 import { localSql } from "./d1"
 const base = process.env.CLOUDSYNC_E2E_URL ?? "http://localhost:3310"
-const id = randomUUID()
-const token = randomUUID()
-await localSql(
-  "INSERT INTO sessions(id,email,tokenHash,expiresAt,lastSeenAt,createdAt) VALUES(?,?,?,?,?,?)",
-  [
-    id,
-    "owner@example.test",
-    createHash("sha256").update(token).digest("hex"),
-    "2099-01-01T00:00:00Z",
-    new Date().toISOString(),
-    new Date().toISOString(),
-  ],
-)
 const browser = await chromium.launch({
   executablePath:
     process.env.CHROME_PATH ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -23,15 +10,6 @@ const browser = await chromium.launch({
 })
 try {
   const context = await browser.newContext()
-  await context.addCookies([
-    {
-      name: "cloudsync_session",
-      value: token,
-      url: base,
-      httpOnly: true,
-      sameSite: "Lax",
-    },
-  ])
   const page = await context.newPage()
   const errors: string[] = []
   page.on("pageerror", (e) => errors.push(e.message))
@@ -129,5 +107,4 @@ try {
   )
 } finally {
   await browser.close()
-  await localSql("DELETE FROM sessions WHERE id=?", [id])
 }

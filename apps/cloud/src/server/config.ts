@@ -1,10 +1,9 @@
 import { createPrivateKey } from "node:crypto"
 import { Config, Context, Effect, Layer, Option, Redacted } from "effect"
 
-export interface ResendDelivery {
-  readonly apiKey: Redacted.Redacted<string>
-  readonly from: string
-}
+export type AccessVerification =
+  | { readonly _tag: "Access"; readonly teamDomain: string; readonly audience: string }
+  | { readonly _tag: "LocalOwner" }
 
 export type CloudFrontSigning =
   | {
@@ -18,8 +17,7 @@ export interface CloudConfigShape {
   readonly nodeEnv: "development" | "test" | "production"
   readonly zipServiceUrl: string | null
   readonly zipServiceSecret: Redacted.Redacted<string>
-  readonly ownerEmail: string
-  readonly sessionSecret: Redacted.Redacted<string>
+  readonly access: AccessVerification
   readonly publicUrl: string
   readonly awsRegion: string
   readonly s3Bucket: string
@@ -29,7 +27,6 @@ export interface CloudConfigShape {
   readonly cloudFrontUrl: string
   readonly cloudFrontCookieDomain: string | null
   readonly cloudFrontSigning: CloudFrontSigning
-  readonly resend: ResendDelivery
 }
 
 const optionOrNull = <A>(option: Option.Option<A>): A | null => Option.getOrNull(option)
@@ -42,8 +39,10 @@ const RawConfig = Config.all({
     Config.map(optionOrNull),
   ),
   zipServiceSecret: Config.Redacted("ZIP_SERVICE_SECRET"),
-  ownerEmail: Config.NonEmptyString("OWNER_EMAIL"),
-  sessionSecret: Config.Redacted("SESSION_SECRET"),
+  accessTeamDomain: Config.option(Config.NonEmptyString("ACCESS_TEAM_DOMAIN")).pipe(
+    Config.map(optionOrNull),
+  ),
+  accessAudience: Config.option(Config.NonEmptyString("ACCESS_AUD")).pipe(Config.map(optionOrNull)),
   publicUrl: Config.NonEmptyString("PUBLIC_URL"),
   awsRegion: Config.NonEmptyString("AWS_REGION").pipe(Config.withDefault("ap-southeast-1")),
   s3Bucket: Config.NonEmptyString("S3_BUCKET"),
@@ -63,8 +62,6 @@ const RawConfig = Config.all({
   cloudFrontPrivateKeyBase64: Config.option(Config.Redacted("CLOUDFRONT_PRIVATE_KEY_BASE64")).pipe(
     Config.map(optionOrNull),
   ),
-  resendApiKey: Config.Redacted("RESEND_API_KEY"),
-  resendFrom: Config.NonEmptyString("RESEND_FROM"),
 })
 
 export class CloudConfig extends Context.Service<CloudConfig, CloudConfigShape>()(
@@ -93,6 +90,19 @@ export class CloudConfig extends Context.Service<CloudConfig, CloudConfigShape>(
         return yield* Effect.die(new Error("CLOUDFRONT_COOKIE_DOMAIN is required in production"))
       }
 
+      if ((raw.accessTeamDomain === null) !== (raw.accessAudience === null)) {
+        return yield* Effect.die(
+          new Error("ACCESS_TEAM_DOMAIN and ACCESS_AUD must be configured together"),
+        )
+      }
+      if (raw.nodeEnv === "production" && raw.accessAudience === null) {
+        return yield* Effect.die(new Error("Cloudflare Access is required in production"))
+      }
+      const access: AccessVerification =
+        raw.accessTeamDomain && raw.accessAudience
+          ? { _tag: "Access", teamDomain: raw.accessTeamDomain, audience: raw.accessAudience }
+          : { _tag: "LocalOwner" }
+
       let cloudFrontSigning: CloudFrontSigning = { _tag: "LocalUnsigned" }
       if (raw.cloudFrontKeyPairId && raw.cloudFrontPrivateKeyBase64) {
         const privateKeyPem = yield* Effect.sync(() => {
@@ -114,8 +124,7 @@ export class CloudConfig extends Context.Service<CloudConfig, CloudConfigShape>(
         nodeEnv: raw.nodeEnv,
         zipServiceUrl: raw.zipServiceUrl,
         zipServiceSecret: raw.zipServiceSecret,
-        ownerEmail: raw.ownerEmail,
-        sessionSecret: raw.sessionSecret,
+        access,
         publicUrl: raw.publicUrl,
         awsRegion: raw.awsRegion,
         s3Bucket: raw.s3Bucket,
@@ -125,7 +134,6 @@ export class CloudConfig extends Context.Service<CloudConfig, CloudConfigShape>(
         cloudFrontUrl: raw.cloudFrontUrl,
         cloudFrontCookieDomain: raw.cloudFrontCookieDomain,
         cloudFrontSigning,
-        resend: { apiKey: raw.resendApiKey, from: raw.resendFrom },
       })
     }),
   )

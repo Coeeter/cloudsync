@@ -4,12 +4,11 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { promisify } from "node:util"
-import { createHash, createHmac, randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { CloudSyncRpcs, type Entry } from "@cloudsync/domain"
 import { type Effect, Layer, ManagedRuntime, Scope } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
 import { RpcClient, RpcSerialization } from "effect/unstable/rpc"
-import { localSql } from "../../scripts/local/d1"
 const url = process.env.CLOUDSYNC_E2E_URL
 const enabled = !!url && ["localhost", "127.0.0.1"].includes(new URL(url).hostname)
 const runtime = ManagedRuntime.make(
@@ -22,14 +21,12 @@ const client = enabled
   ? await runtime.runPromise(RpcClient.make(CloudSyncRpcs).pipe(Scope.provide(scope)))
   : (null as never)
 type Client = typeof client
-const token = randomUUID()
-const sessionId = randomUUID()
 function call<K extends keyof Client>(
   tag: K,
-  input: Omit<Parameters<Client[K]>[0], "sessionToken">,
+  input: Parameters<Client[K]>[0],
 ): Promise<Effect.Success<ReturnType<Client[K]>>> {
   const rpc = client[tag] as unknown as (input: unknown) => Effect.Effect<unknown, unknown>
-  return runtime.runPromise(rpc({ ...input, sessionToken: token })) as never
+  return runtime.runPromise(rpc(input)) as never
 }
 async function upload(
   parentId: string | null,
@@ -53,21 +50,9 @@ let root: Entry
 const suite = enabled ? describe : describe.skip
 suite("Workers RPC with real local D1 and S3", () => {
   beforeAll(async () => {
-    await localSql(
-      "INSERT INTO sessions(id,email,tokenHash,expiresAt,lastSeenAt,createdAt) VALUES(?,?,?,?,?,?)",
-      [
-        sessionId,
-        "owner@example.test",
-        createHash("sha256").update(token).digest("hex"),
-        "2099-01-01T00:00:00Z",
-        new Date().toISOString(),
-        new Date().toISOString(),
-      ],
-    )
     root = await call("catalog.createFolder", { parentId: null, name: `e2e-${randomUUID()}` })
   })
   afterAll(async () => {
-    await localSql("DELETE FROM sessions WHERE id=?", [sessionId])
     await runtime.dispose()
   })
   it("verifies uploaded client previews and allows replacing them", async () => {
@@ -155,7 +140,7 @@ suite("Workers RPC with real local D1 and S3", () => {
     await call("catalog.trash", { id: child.id })
     await call("catalog.createFolder", { parentId: parent.id, name: "Child" })
     await call("catalog.trash", { id: parent.id })
-    const bin = await call("catalog.recycleBin", {})
+    const bin = await call("catalog.recycleBin", undefined)
     expect(bin.some((e) => e.id === child.id)).toBe(false)
     await call("catalog.restore", { id: parent.id })
     const listing = await call("catalog.list", { parentId: parent.id })
@@ -179,20 +164,6 @@ suite("Workers RPC with real local D1 and S3", () => {
     await expect(call("download.file", { id: entry.id })).rejects.toBeDefined()
     await call("catalog.deletePermanently", { id: dir.id })
     await expect(call("catalog.restore", { id: dir.id })).rejects.toBeDefined()
-  })
-  it("consumes a valid PIN once across concurrent verification", async () => {
-    const id = randomUUID()
-    const code = "123456"
-    const hash = createHmac("sha256", "local-session-secret").update(`${id}:${code}`).digest("hex")
-    await localSql(
-      "INSERT INTO auth_pins(id,email,codeHash,expiresAt,createdAt) VALUES(?,?,?,?,?)",
-      [id, "owner@example.test", hash, "2099-01-01T00:00:00Z", new Date().toISOString()],
-    )
-    const results = await Promise.allSettled([
-      call("auth.verifyPin", { email: "owner@example.test", code, client: "web" }),
-      call("auth.verifyPin", { email: "owner@example.test", code, client: "desktop" }),
-    ])
-    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1)
   })
   it("batches bulk actions with covered IDs, missing items and collision naming", async () => {
     const parent = await call("catalog.createFolder", { parentId: root.id, name: "Bulk" })

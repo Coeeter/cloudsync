@@ -9,6 +9,7 @@ const empty: DesktopSnapshot = {
   active: [],
   failed: [],
   uploaded: 0,
+  signInExpired: false,
   authenticated: false,
   email: null,
   cloudUrl: "",
@@ -17,9 +18,7 @@ const empty: DesktopSnapshot = {
 
 export const registry = AtomRegistry.make()
 export const stateAtom = Atom.make<DesktopSnapshot>(empty)
-export const authStepAtom = Atom.make<"email" | "pin">("email")
 export const busyAtom = Atom.make(false)
-export const noticeAtom = Atom.make<string | null>(null)
 
 // Main-process handlers resolve to an error message (or null) and also publish it in the snapshot.
 const run = (operation: () => Promise<string | null>) =>
@@ -36,26 +35,8 @@ export const actions = {
     registry.set(stateAtom, await window.cloudsync.state())
     return window.cloudsync.onState((state) => registry.set(stateAtom, state))
   },
-  requestPin: async (email: string) => {
-    registry.set(noticeAtom, null)
-    if ((await run(() => window.cloudsync.requestPin(email))) === null)
-      registry.set(authStepAtom, "pin")
-  },
-  resendPin: async () => {
-    const email = registry.get(stateAtom).email
-    if (!email) return registry.set(authStepAtom, "email")
-    if ((await run(() => window.cloudsync.requestPin(email))) === null)
-      registry.set(noticeAtom, "A new code was sent.")
-  },
-  changeEmail: () => {
-    registry.set(noticeAtom, null)
-    registry.set(authStepAtom, "email")
-  },
-  verifyPin: (code: string) => run(() => window.cloudsync.verifyPin(code)),
-  signOut: async () => {
-    await run(() => window.cloudsync.signOut())
-    registry.set(authStepAtom, "email")
-  },
+  signIn: () => run(() => window.cloudsync.signIn()),
+  signOut: () => run(() => window.cloudsync.signOut()),
   chooseFolder: () => run(() => window.cloudsync.chooseFolder()),
   retry: () => run(() => window.cloudsync.retry()),
   openWebsite: () => run(() => window.cloudsync.openWebsite()),

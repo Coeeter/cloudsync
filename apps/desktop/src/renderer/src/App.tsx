@@ -1,6 +1,4 @@
 import { Button } from "@cloudsync/ui/components/button"
-import { Input } from "@cloudsync/ui/components/input"
-import { InputOTP, InputOTPGroup, InputOTPSlot } from "@cloudsync/ui/components/input-otp"
 import {
   CheckCircle2,
   ExternalLink,
@@ -9,9 +7,9 @@ import {
   RefreshCw,
   UploadCloud,
 } from "lucide-react"
-import { type FormEvent, useEffect, useState } from "react"
+import { useEffect } from "react"
 import appIconUrl from "../../../build/icon.svg"
-import { actions, authStepAtom, busyAtom, noticeAtom, stateAtom } from "./state"
+import { actions, busyAtom, stateAtom } from "./state"
 import { useAtomValue } from "./use-atom"
 
 const fileName = (path: string) => path.split("/").at(-1) ?? path
@@ -47,7 +45,7 @@ export function App() {
       </main>
     )
 
-  if (!state.authenticated) return <Login busy={busy} email={state.email} error={state.error} />
+  if (!state.authenticated) return <Login busy={busy} error={state.error} />
 
   return (
     <main className="min-h-screen px-8 pt-16 pb-8 [-webkit-app-region:drag]">
@@ -157,116 +155,23 @@ export function App() {
   )
 }
 
-function Login({
-  busy,
-  email,
-  error,
-}: {
-  busy: boolean
-  email: string | null
-  error: string | null
-}) {
-  const step = useAtomValue(authStepAtom)
-  const notice = useAtomValue(noticeAtom)
-  const [code, setCode] = useState("")
-
-  useEffect(() => {
-    if (step === "pin") setCode("")
-  }, [step])
-
-  const submitEmail = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    const value = String(new FormData(event.currentTarget).get("email") ?? "").trim()
-    if (value) void actions.requestPin(value)
-  }
-  const submitCode = (value: string) => {
-    if (value.length === 6 && !busy) void actions.verifyPin(value)
-  }
-
+function Login({ busy, error }: { busy: boolean; error: string | null }) {
   return (
     <main className="mx-auto grid min-h-screen max-w-sm content-center px-8 pt-16 pb-8 [-webkit-app-region:drag]">
       <img className="size-12 shrink-0" src={appIconUrl} alt="" />
       <h1 className="mt-2.5 text-3xl tracking-tighter">CloudSync</h1>
-      {step === "email" ? (
-        <form
-          className="mt-6 grid gap-3 [-webkit-app-region:no-drag]"
-          key="email"
-          onSubmit={submitEmail}
-        >
-          <p className="mt-1 mb-0 leading-normal text-muted-foreground">
-            Sign in with the owner email to receive a code.
-          </p>
-          <Input
-            name="email"
-            type="email"
-            autoComplete="email"
-            defaultValue={email ?? ""}
-            autoFocus
-            required
-            placeholder="you@example.com"
-            className="h-12 rounded-lg border-border bg-card px-3 text-base text-foreground focus-visible:border-ring"
-          />
-          {error ? <p className="m-0 text-xs text-destructive">{error}</p> : null}
-          <Button disabled={busy}>{busy ? "Sending…" : "Send code"}</Button>
-        </form>
-      ) : (
-        <form
-          className="mt-6 grid gap-3 [-webkit-app-region:no-drag]"
-          key="pin"
-          onSubmit={(event) => {
-            event.preventDefault()
-            submitCode(code)
-          }}
-        >
-          <p className="mt-1 mb-0 leading-normal text-muted-foreground">
-            Enter the six-digit code sent to{" "}
-            <strong className="font-[540] text-foreground">{email}</strong>.
-          </p>
-          <InputOTP
-            name="code"
-            autoComplete="one-time-code"
-            maxLength={6}
-            autoFocus
-            required
-            pattern="[0-9]*"
-            value={code}
-            onChange={setCode}
-            onComplete={submitCode}
-            containerClassName="w-full"
-          >
-            <InputOTPGroup className="w-full">
-              {[0, 1, 2, 3, 4, 5].map((index) => (
-                <InputOTPSlot
-                  className="h-12 flex-1 bg-card font-mono text-xl"
-                  index={index}
-                  key={index}
-                />
-              ))}
-            </InputOTPGroup>
-          </InputOTP>
-          {error ? <p className="m-0 text-xs text-destructive">{error}</p> : null}
-          {notice ? <p className="m-0 text-xs text-muted-foreground">{notice}</p> : null}
-          <Button disabled={busy || code.length !== 6}>{busy ? "Checking…" : "Sign in"}</Button>
-          <div className="flex justify-between">
-            <button
-              className="border-0 bg-transparent px-0 py-1 text-xs text-muted-foreground hover:not-disabled:text-foreground"
-              type="button"
-              onClick={actions.changeEmail}
-              disabled={busy}
-            >
-              Use a different email
-            </button>
-            <button
-              className="border-0 bg-transparent px-0 py-1 text-xs text-muted-foreground hover:not-disabled:text-foreground"
-              type="button"
-              onClick={() => void actions.resendPin()}
-              disabled={busy}
-            >
-              Resend code
-            </button>
-          </div>
-        </form>
-      )}
+      <div className="mt-6 grid gap-3 [-webkit-app-region:no-drag]">
+        <p className="mt-1 mb-0 leading-normal text-muted-foreground">
+          {busy
+            ? "Finish signing in in your browser, then come back here."
+            : "Sign in through your browser to start archiving."}
+        </p>
+        {error && !busy ? <p className="m-0 text-xs text-destructive">{error}</p> : null}
+        {/* Clicking again restarts the flow, in case the browser tab was closed. */}
+        <Button onClick={() => void actions.signIn()}>
+          {busy ? "Open the browser again" : "Sign in with browser"}
+        </Button>
+      </div>
     </main>
   )
 }

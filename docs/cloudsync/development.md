@@ -2,7 +2,7 @@
 
 Cloudsync now targets Cloudflare Workers + D1, with a Node Lambda for ZIPs. Production is still Dokploy/PostgreSQL until a separately authorized cutover. See [current plan](../cloudflare/plan.md) and [cutover](../cloudflare/cutover.md).
 
-Doppler project cloudsync (dev/prod) is the runtime secret source; Resend remains email delivery. Never print secrets or signed URLs. The prepared release workflow pipes a selected Doppler payload directly to Wrangler. Lambda ZIP credentials use IAM; its webhook secret comes from one standard SSM SecureString outside Terraform state.
+Doppler project cloudsync (dev/prod) is the runtime secret source. Local development has no Cloudflare Access in front, so without `ACCESS_TEAM_DOMAIN`/`ACCESS_AUD` every request is the owner; production refuses to start without them. Never print secrets or signed URLs. The prepared release workflow pipes a selected Doppler payload directly to Wrangler. Lambda ZIP credentials use IAM; its webhook secret comes from one standard SSM SecureString outside Terraform state.
 
 For entirely disposable local validation, use the pinned S3Mock service (`docker compose -f compose.dev.yml up -d s3`), ignored apps/cloud/.dev.vars with fake local credentials, and Wrangler's local D1. No real cloud object or paid fixture is needed. The separate postgres service is only for migration rehearsal, not the app runtime. Check existing processes before starting servers.
 

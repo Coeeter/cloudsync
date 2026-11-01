@@ -8,7 +8,7 @@ import {
 } from "@cloudsync/domain"
 import { Array as Arr, Cause, Effect, Exit, Option, Predicate, Stream } from "effect"
 import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity"
-import { CloudSync, establishSession, logout } from "./rpc"
+import { CloudSync, refreshViewerCookies } from "./rpc"
 import {
   retryBrowserPreview,
   collectDroppedFiles,
@@ -19,7 +19,6 @@ import {
 export const registry = AtomRegistry.make()
 
 const catalogKeys = ["catalog"]
-const sessionKeys = ["session"]
 /** The server's largest page; refreshes re-fetch at most this many entries in one request. */
 const maxPageSize = 600
 
@@ -54,30 +53,16 @@ export const sessionAtom = CloudSync.runtime
   .atom(
     Effect.gen(function* () {
       const client = yield* CloudSync
-      const session = yield* client("auth.session", {})
+      const session = yield* client("auth.session", undefined)
       // Re-issues the short-lived CloudFront viewer cookies for a long-lived session.
-      yield* establishSession(undefined).pipe(Effect.ignore)
+      yield* refreshViewerCookies.pipe(Effect.ignore)
       return session
     }),
   )
-  .pipe(Atom.withReactivity(sessionKeys), Atom.keepAlive)
+  .pipe(Atom.keepAlive)
 
-export const requestPinAtom = CloudSync.runtime.fn((email: string) =>
-  CloudSync.use((client) => client("auth.requestPin", { email })),
-)
-
-export const verifyPinAtom = CloudSync.runtime.fn(
-  Effect.fnUntraced(function* ({ email, code }: { email: string; code: string }) {
-    const client = yield* CloudSync
-    const session = yield* client("auth.verifyPin", { email, code, client: "web" })
-    yield* establishSession(session.token)
-  }),
-  { reactivityKeys: sessionKeys },
-)
-
-// A full reload drops every cached listing along with the session.
-export const signOut = () =>
-  Effect.runPromise(logout.pipe(Effect.ignore)).then(() => window.location.assign("/"))
+// Signing out ends the Access session; the full navigation also drops every cached listing.
+export const signOut = () => window.location.assign("/auth/logout")
 
 const needsPreview = (entry: Entry) => entry.kind === "file" && entry.previewStatus === "pending"
 
@@ -158,11 +143,10 @@ export const loadReader = (folderId: string) =>
     }),
   )
 
-export const recycleBinAtom = CloudSync.query(
-  "catalog.recycleBin",
-  {},
-  { reactivityKeys: catalogKeys, timeToLive: "1 minute" },
-)
+export const recycleBinAtom = CloudSync.query("catalog.recycleBin", undefined, {
+  reactivityKeys: catalogKeys,
+  timeToLive: "1 minute",
+})
 
 export const trashedFolderAtom = Atom.family((parentId: string) =>
   CloudSync.query(

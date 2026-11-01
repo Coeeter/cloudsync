@@ -47,25 +47,6 @@ export interface LegacyUpload {
   updated_at: string
 }
 
-export interface LegacyPin {
-  id: string
-  email: string
-  code_hash: string
-  attempts: number
-  expires_at: string
-  consumed_at: string | null
-  created_at: string
-}
-
-export interface LegacySession {
-  id: string
-  email: string
-  token_hash: string
-  expires_at: string
-  last_seen_at: string
-  created_at: string
-}
-
 export interface LegacyJob {
   id: string
   kind: string
@@ -104,8 +85,6 @@ export interface LegacySnapshot {
   readonly exportedAt: string
   readonly entries: Array<LegacyEntry>
   readonly uploads: Array<LegacyUpload>
-  readonly pins: Array<LegacyPin>
-  readonly sessions: Array<LegacySession>
   readonly jobs: Array<LegacyJob>
   readonly rateLimits: Array<LegacyRateLimit>
   readonly archives: Array<LegacyArchive>
@@ -114,8 +93,6 @@ export interface LegacySnapshot {
 export const TABLE_FILES = {
   entries: "entries.jsonl",
   uploads: "uploads.jsonl",
-  pins: "auth_pins.jsonl",
-  sessions: "sessions.jsonl",
   jobs: "jobs.jsonl",
   rateLimits: "rate_limits.jsonl",
   archives: "archives.jsonl",
@@ -136,8 +113,6 @@ export async function readSnapshot(directory: string): Promise<LegacySnapshot> {
     exportedAt: manifest.exportedAt,
     entries: await readJsonl(join(directory, TABLE_FILES.entries)),
     uploads: await readJsonl(join(directory, TABLE_FILES.uploads)),
-    pins: await readJsonl(join(directory, TABLE_FILES.pins)),
-    sessions: await readJsonl(join(directory, TABLE_FILES.sessions)),
     jobs: await readJsonl(join(directory, TABLE_FILES.jobs)),
     rateLimits: await readJsonl(join(directory, TABLE_FILES.rateLimits)),
     archives: await readJsonl(join(directory, TABLE_FILES.archives)),

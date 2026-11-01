@@ -26,9 +26,8 @@ import {
   DropdownMenuTrigger,
 } from "@cloudsync/ui/components/dropdown-menu"
 import { Input } from "@cloudsync/ui/components/input"
-import { InputOTP, InputOTPGroup, InputOTPSlot } from "@cloudsync/ui/components/input-otp"
 import { Progress } from "@cloudsync/ui/components/progress"
-import { createFileRoute, Link, useRouter } from "@tanstack/react-router"
+import { createFileRoute, Link } from "@tanstack/react-router"
 import { Exit } from "effect"
 import { AsyncResult } from "effect/unstable/reactivity"
 import {
@@ -57,7 +56,6 @@ import {
 import {
   type ChangeEvent,
   type DragEvent,
-  type FormEvent,
   type PointerEvent,
   type MouseEvent,
   useEffect,
@@ -95,7 +93,6 @@ import {
   renameAtom,
   renameEntryAtom,
   renameValueAtom,
-  requestPinAtom,
   restoreAtom,
   retryPreviewAtom,
   searchAtom,
@@ -106,7 +103,6 @@ import {
   type UploadSource,
   uploadAtom,
   uploadProgressAtom,
-  verifyPinAtom,
   visit,
 } from "../client/state"
 import { useAtomValue } from "../client/use-atom"
@@ -136,124 +132,15 @@ function CloudSyncApp() {
   return <SignIn />
 }
 
+// Access gates every page load, so this only shows once the Access session has expired while
+// the page stayed open; reloading sends the browser back through the Access login.
 function SignIn() {
-  const router = useRouter()
-  const requestPin = useAtomValue(requestPinAtom)
-  const verifyPin = useAtomValue(verifyPinAtom)
-  const busy = requestPin.waiting || verifyPin.waiting
-  const error = useAtomValue(errorAtom)
-  const [view, setView] = useState<"email" | "pin">("email")
-  const [savedEmail, setSavedEmail] = useState("")
-  const [notice, setNotice] = useState<string | null>(null)
-  const [code, setCode] = useState("")
-
-  const sendPin = (email: string, sentNotice: string | null) =>
-    mutate(requestPinAtom, email).then((exit) => {
-      if (Exit.isFailure(exit)) return
-      setSavedEmail(email)
-      setNotice(sentNotice)
-      setCode("")
-      setView("pin")
-    })
-
-  const submitEmail = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    const email = String(new FormData(event.currentTarget).get("email") ?? "").trim()
-    if (email) void sendPin(email, null)
-  }
-
-  const submitCode = (value: string) => {
-    if (value.length !== 6 || busy) return
-    void mutate(verifyPinAtom, { email: savedEmail, code: value }).then((exit) => {
-      if (Exit.isSuccess(exit)) void router.invalidate()
-    })
-  }
-
   return (
     <main className="grid min-h-screen place-items-center p-6">
-      <section className="w-full max-w-sm">
+      <section className="grid w-full max-w-sm gap-3">
         <h1 className="mb-2 text-3xl font-semibold tracking-tighter">CloudSync</h1>
-        {view === "email" ? (
-          <form key="email" className="grid gap-3" onSubmit={submitEmail}>
-            <p className="mb-3.5 text-muted-foreground leading-normal">
-              Enter the owner email to receive a sign-in code.
-            </p>
-            <Input
-              type="email"
-              name="email"
-              autoComplete="email"
-              defaultValue={savedEmail}
-              placeholder="you@example.com"
-              required
-              autoFocus
-            />
-            {error ? <p className="m-0 text-sm text-destructive">{error}</p> : null}
-            <Button disabled={busy}>{busy ? "Sending…" : "Send code"}</Button>
-          </form>
-        ) : (
-          <form
-            key="pin"
-            className="grid gap-3"
-            onSubmit={(event) => {
-              event.preventDefault()
-              submitCode(code)
-            }}
-          >
-            <p className="mb-3.5 text-muted-foreground leading-normal">
-              Enter the six-digit code sent to{" "}
-              <strong className="break-all font-[540] text-foreground">{savedEmail}</strong>.
-            </p>
-            <InputOTP
-              name="code"
-              autoComplete="one-time-code"
-              maxLength={6}
-              value={code}
-              onChange={setCode}
-              onComplete={submitCode}
-              required
-              autoFocus
-              pattern="[0-9]*"
-              containerClassName="w-full"
-            >
-              <InputOTPGroup className="w-full">
-                {[0, 1, 2, 3, 4, 5].map((index) => (
-                  <InputOTPSlot
-                    className="h-12 flex-1 font-mono text-xl"
-                    index={index}
-                    key={index}
-                  />
-                ))}
-              </InputOTPGroup>
-            </InputOTP>
-            {error ? <p className="m-0 text-sm text-destructive">{error}</p> : null}
-            {notice ? <p className="m-0 text-sm text-muted-foreground">{notice}</p> : null}
-            <Button disabled={busy || code.length !== 6}>
-              {busy ? "Checking…" : "Open archive"}
-            </Button>
-            <div className="flex justify-between gap-3">
-              <button
-                className="border-0 bg-transparent px-0 py-1 text-sm text-muted-foreground hover:not-disabled:text-foreground"
-                type="button"
-                onClick={() => {
-                  registry.set(errorAtom, null)
-                  setNotice(null)
-                  setView("email")
-                }}
-                disabled={busy}
-              >
-                Use a different email
-              </button>
-              <button
-                className="border-0 bg-transparent px-0 py-1 text-sm text-muted-foreground hover:not-disabled:text-foreground"
-                type="button"
-                onClick={() => void sendPin(savedEmail, "A new code was sent.")}
-                disabled={busy}
-              >
-                Resend code
-              </button>
-            </div>
-          </form>
-        )}
+        <p className="mb-3.5 text-muted-foreground leading-normal">Your sign-in has expired.</p>
+        <Button onClick={() => window.location.reload()}>Sign in again</Button>
       </section>
     </main>
   )

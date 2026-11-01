@@ -11,8 +11,7 @@ const config: CloudConfigShape = {
   nodeEnv: "development",
   zipServiceUrl: null,
   zipServiceSecret: Redacted.make("unused"),
-  ownerEmail: "fixture@example.com",
-  sessionSecret: Redacted.make("unused"),
+  access: { _tag: "LocalOwner" },
   publicUrl: "http://localhost:3000",
   awsRegion: "ap-southeast-1",
   s3Bucket: "fixture",
@@ -26,7 +25,6 @@ const config: CloudConfigShape = {
     keyPairId: "K123",
     privateKeyPem: Redacted.make(privateKey.export({ type: "pkcs8", format: "pem" }).toString()),
   },
-  resend: { apiKey: Redacted.make("unused"), from: "fixture@example.com" },
 }
 const layer = Storage.layer.pipe(Layer.provide(Layer.succeed(CloudConfig, config)))
 

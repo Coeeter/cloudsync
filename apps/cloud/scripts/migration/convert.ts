@@ -35,8 +35,6 @@ export function convert(snapshot: LegacySnapshot) {
   const tables: Record<string, Row[]> = {
     entries: [],
     uploads: [],
-    sessions: [],
-    auth_pins: [],
     archives: [],
     cleanup: [],
     legacy_jobs: [],
@@ -71,10 +69,6 @@ export function convert(snapshot: LegacySnapshot) {
     converted.previewEntryId = null
     tables.uploads?.push(converted)
   }
-  for (const row of snapshot.sessions)
-    tables.sessions?.push(convertRow(row as unknown as Record<string, unknown>))
-  for (const row of snapshot.pins)
-    tables.auth_pins?.push(convertRow(row as unknown as Record<string, unknown>))
   for (const row of snapshot.archives) {
     const converted = convertRow(row as unknown as Record<string, unknown>)
     const id = row.id

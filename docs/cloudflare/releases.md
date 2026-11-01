@@ -7,6 +7,18 @@
 
 Schema migrations run on every deploy and must stay additive. The one-time PostgreSQL data import is a separate cutover step; see [cutover](cutover.md).
 
+## Sign-in
+
+Cloudflare Access (Zero Trust, free tier) protects the custom domain, so the app has no sign-in code or session table of its own. The Worker still verifies the `Cf-Access-Jwt-Assertion` JWT on every route (signature against the team's certs, issuer and the application's AUD), so a request that skips Access is rejected. `ACCESS_TEAM_DOMAIN` (`<team>.cloudflareaccess.com`) and `ACCESS_AUD` live in Doppler `cloudsync/prod` like the other deployment identifiers.
+
+Access applications on the Worker domain, created with `cf zero-trust access applications create`:
+
+- The app itself: self-hosted, session duration `720h`, one-time PIN login, one allow policy including the owner email. Its `aud` is `ACCESS_AUD`.
+- `<domain>/internal/zip`: a bypass policy for everyone. The ZIP Lambda authenticates with `ZIP_SERVICE_SECRET` instead.
+- `<domain>/health`: a bypass policy for everyone, for deployment checks.
+
+The desktop app opens `/auth/desktop?port=…&state=…` in the system browser. After Access signs the browser in, the Worker redirects to `http://127.0.0.1:<port>/callback` with the Access token, which the app sends as `cf-access-token` on every RPC. When Access rejects it (a redirect to the login page once the session expires), the app signs out and asks to sign in again.
+
 ## One-time setup (not done)
 
 - AWS: with admin credentials, `terraform init && terraform apply` in `infra/terraform/bootstrap`. This creates the state bucket `cloudsync-terraform-123456789012`, the GitHub OIDC provider, and `cloudsync-github-deploy`, which only `main` of Coeeter/cloudsync can assume. Its local state is gitignored; the resources can be re-imported.

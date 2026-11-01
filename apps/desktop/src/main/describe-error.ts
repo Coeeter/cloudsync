@@ -21,3 +21,13 @@ export function describe(cause: unknown): string {
   }
   return parts.join(": ")
 }
+
+export function httpStatus(cause: unknown): number | undefined {
+  let current: unknown = cause
+  for (let depth = 0; depth < 6 && typeof current === "object" && current !== null; depth++) {
+    const value = current as { response?: { status?: unknown }; reason?: unknown; cause?: unknown }
+    if (typeof value.response?.status === "number") return value.response.status
+    current = value.reason ?? value.cause
+  }
+  return undefined
+}

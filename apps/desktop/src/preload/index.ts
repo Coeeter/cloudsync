@@ -5,8 +5,7 @@ type Outcome = Promise<string | null>
 
 const api = {
   state: (): Promise<DesktopSnapshot> => ipcRenderer.invoke("cloudsync:state"),
-  requestPin: (email: string): Outcome => ipcRenderer.invoke("cloudsync:requestPin", email),
-  verifyPin: (code: string): Outcome => ipcRenderer.invoke("cloudsync:verifyPin", code),
+  signIn: (): Outcome => ipcRenderer.invoke("cloudsync:signIn"),
   signOut: (): Outcome => ipcRenderer.invoke("cloudsync:signOut"),
   chooseFolder: (): Outcome => ipcRenderer.invoke("cloudsync:chooseFolder"),
   retry: (): Outcome => ipcRenderer.invoke("cloudsync:retry"),
