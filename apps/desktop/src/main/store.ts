@@ -53,10 +53,15 @@ export class DesktopStore extends Context.Service<DesktopStore, DesktopStoreShap
           Effect.mapError(storeError("CloudSync settings have an invalid shape")),
         )
       })
+      // Written beside the file and renamed over it, so quitting mid-write cannot leave the
+      // truncated file that stops CloudSync from starting.
       const save: DesktopStoreShape["save"] = (settings) =>
         fileSystem
-          .writeFileString(path, JSON.stringify(settings), { mode: 0o600 })
-          .pipe(Effect.mapError(storeError("Could not save CloudSync settings")))
+          .writeFileString(`${path}.tmp`, JSON.stringify(settings), { mode: 0o600 })
+          .pipe(
+            Effect.andThen(fileSystem.rename(`${path}.tmp`, path)),
+            Effect.mapError(storeError("Could not save CloudSync settings")),
+          )
       const encryptToken: DesktopStoreShape["encryptToken"] = (token) =>
         Effect.try({
           try: () => {

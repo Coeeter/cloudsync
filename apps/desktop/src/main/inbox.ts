@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
+import { type FSWatcher, watch } from "node:fs"
+import { readdir, stat } from "node:fs/promises"
 import { completeDirectUpload } from "@cloudsync/core"
-import chokidar, { type FSWatcher } from "chokidar"
 import {
   ByteSize,
   Context,
@@ -72,6 +73,9 @@ function mimeFor(path: string): string {
 }
 
 const CONCURRENCY = 6
+// A path is considered once it has been quiet this long, so files still being copied in are
+// not picked up mid-write. uploadOne re-checks size and mtime before uploading anyway.
+const SETTLE_MS = 1500
 // S3's limit for a single PUT; larger files would need a multipart upload.
 const MAX_SINGLE_UPLOAD_BYTES = 5 * 1024 ** 3
 
@@ -83,7 +87,10 @@ export class Inbox extends Context.Service<Inbox, InboxShape>()("@cloudsync/desk
       const fileSystem = yield* FileSystem.FileSystem
       const pathService = yield* Path.Path
       const serviceContext = yield* Effect.context<Remote>()
+      // One recursive FSEvents stream for the whole inbox. chokidar opened a watcher per
+      // directory, and closing them took 23 seconds of blocked main process for 2,000 folders.
       let watcher: FSWatcher | null = null
+      const settling = new Map<string, ReturnType<typeof setTimeout>>()
       let root: string | null = null
       let token: string | null = null
       let uploaded = 0
@@ -308,9 +315,36 @@ export class Inbox extends Context.Service<Inbox, InboxShape>()("@cloudsync/desk
         pump()
       }
 
-      const stop = Effect.promise(async () => {
-        await watcher?.close()
+      const filesUnder = async (directory: string) =>
+        (await readdir(directory, { recursive: true, withFileTypes: true }).catch(() => []))
+          .filter((entry) => entry.isFile())
+          .map((entry) => pathService.join(entry.parentPath, entry.name))
+
+      // A folder moved into the inbox arrives as a single event, so its files are listed here.
+      const consider = async (path: string) => {
+        const info = await stat(path).catch(() => null)
+        if (!info || !root || !path.startsWith(root)) return
+        if (info.isFile()) enqueue(path, info.size)
+        else if (info.isDirectory()) for (const file of await filesUnder(path)) settle(file)
+      }
+
+      const settle = (path: string) => {
+        if (path.split(pathService.sep).includes(".DS_Store")) return
+        clearTimeout(settling.get(path))
+        settling.set(
+          path,
+          setTimeout(() => {
+            settling.delete(path)
+            void consider(path)
+          }, SETTLE_MS),
+        )
+      }
+
+      const stop = Effect.sync(() => {
+        watcher?.close()
         watcher = null
+        for (const timer of settling.values()) clearTimeout(timer)
+        settling.clear()
         root = null
         token = null
         signInExpired = false
@@ -323,23 +357,20 @@ export class Inbox extends Context.Service<Inbox, InboxShape>()("@cloudsync/desk
           yield* stop
           root = pathService.resolve(folder)
           token = sessionToken
-          watcher = chokidar.watch(root, {
-            ignoreInitial: false,
-            persistent: true,
-            awaitWriteFinish: { stabilityThreshold: 1500, pollInterval: 250 },
-            followSymlinks: false,
-            alwaysStat: true,
-            ignored: (path) => path.split(pathService.sep).includes(".DS_Store"),
-          })
-          watcher.on("add", (path, stats) => enqueue(path, stats?.size ?? 0))
-          watcher.on("change", (path, stats) => enqueue(path, stats?.size ?? 0))
+          const localRoot = root
+          watcher = yield* Effect.try(() =>
+            watch(localRoot, { recursive: true }, (_event, name) => {
+              if (name) settle(pathService.join(localRoot, name.toString()))
+            }),
+          )
           watcher.on("error", (cause) => {
-            failed.set(root ?? folder, {
+            failed.set(localRoot, {
               message: cause instanceof Error ? cause.message : "Watcher failed",
               size: 0,
             })
             publish()
           })
+          for (const file of yield* Effect.promise(() => filesUnder(localRoot))) settle(file)
           publish()
         }).pipe(Effect.mapError(inboxError(`Could not watch ${folder}`)))
 
