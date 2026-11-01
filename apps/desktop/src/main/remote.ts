@@ -61,15 +61,20 @@ export class Remote extends Context.Service<Remote, RemoteShape>()("@cloudsync/d
     Effect.gen(function* () {
       const config = yield* DesktopConfig
       const fileSystem = yield* FileSystem.FileSystem
-      const protocol = cloudRpcProtocol(config.cloudUrl)
-      const signedIn = (token: string) => ({ headers: { "cf-access-token": token } })
-      const call = <A, E>(operation: string, use: (client: CloudClient) => Effect.Effect<A, E>) =>
+      const call = <A, E>(
+        operation: string,
+        token: string,
+        use: (client: CloudClient) => Effect.Effect<A, E>,
+      ) =>
         Effect.scoped(
-          RpcClient.make(CloudSyncRpcs).pipe(Effect.flatMap(use), Effect.provide(protocol)),
+          RpcClient.make(CloudSyncRpcs).pipe(
+            Effect.flatMap(use),
+            Effect.provide(cloudRpcProtocol(config.cloudUrl, token)),
+          ),
         ).pipe(Effect.mapError(remoteError(operation)))
 
       const authenticate: RemoteShape["authenticate"] = (token) =>
-        call("authenticate", (client) => client["auth.session"](undefined, signedIn(token)))
+        call("authenticate", token, (client) => client["auth.session"]())
       // A saturated uplink occasionally times out new connections to Cloudflare. Retrying just
       // the RPC keeps that from restarting a multi-gigabyte upload; finalize is idempotent.
       const retryTransport = <A>(effect: Effect.Effect<A, RemoteError>) =>
@@ -81,14 +86,10 @@ export class Remote extends Context.Service<Remote, RemoteShape>()("@cloudsync/d
           }),
         )
       const begin: RemoteShape["begin"] = (token, upload) =>
-        retryTransport(
-          call("beginUpload", (client) => client["upload.begin"](upload, signedIn(token))),
-        )
+        retryTransport(call("beginUpload", token, (client) => client["upload.begin"](upload)))
       const finalize: RemoteShape["finalize"] = (token, uploadId) =>
         retryTransport(
-          call("finalizeUpload", (client) =>
-            client["upload.finalize"]({ uploadId }, signedIn(token)),
-          ),
+          call("finalizeUpload", token, (client) => client["upload.finalize"]({ uploadId })),
         )
       // Originals stream from disk so large videos are never held in memory. Presigned S3 PUTs
       // reject chunked bodies, and node:http sends the exact Content-Length that bodyFile sets.
