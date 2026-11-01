@@ -93,8 +93,10 @@ const DesktopSignInRoute = HttpRouter.add(
     callback.searchParams.set("token", request.headers["cf-access-jwt-assertion"] ?? "local")
     return HttpServerResponse.redirect(callback.toString())
   }).pipe(
+    // Access admitted the browser but the Worker rejected its session, so sign out of Access
+    // rather than show a dead end; the desktop app's next attempt then gets a fresh login.
     Effect.catchTag("CloudSyncError", () =>
-      Effect.succeed(HttpServerResponse.text("Unauthorized", { status: 401 })),
+      Effect.succeed(HttpServerResponse.redirect("/auth/logout")),
     ),
     Effect.catch(() =>
       Effect.succeed(HttpServerResponse.text("Invalid sign-in request", { status: 400 })),

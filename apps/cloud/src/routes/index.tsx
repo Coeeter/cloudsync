@@ -132,15 +132,16 @@ function CloudSyncApp() {
   return <SignIn />
 }
 
-// Access gates every page load, so this only shows once the Access session has expired while
-// the page stayed open; reloading sends the browser back through the Access login.
+// Access gates every page load, so this shows when the Access session expired while the page
+// stayed open, or when Access still admits a session the Worker rejects (for example one issued
+// before the team domain changed). Reloading would loop in the second case, so this signs out.
 function SignIn() {
   return (
     <main className="grid min-h-screen place-items-center p-6">
       <section className="grid w-full max-w-sm gap-3">
         <h1 className="mb-2 text-3xl font-semibold tracking-tighter">CloudSync</h1>
         <p className="mb-3.5 text-muted-foreground leading-normal">Your sign-in has expired.</p>
-        <Button onClick={() => window.location.reload()}>Sign in again</Button>
+        <Button onClick={signOut}>Sign in again</Button>
       </section>
     </main>
   )
