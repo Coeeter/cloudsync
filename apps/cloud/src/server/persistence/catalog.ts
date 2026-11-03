@@ -104,29 +104,37 @@ export class CatalogStore {
       siblings.map((e) => e.name),
     )
   }
-  insert(row: EntryRow): Statement {
+  insert(row: EntryRow, conflict: "abort" | "ignore" = "abort"): Statement {
     const fields = Object.keys(row) as (keyof EntryRow)[]
     return [
-      `INSERT INTO entries(${fields.join(",")}) VALUES(${fields.map(() => "?").join(",")})`,
+      `INSERT${conflict === "ignore" ? " OR IGNORE" : ""} INTO entries(${fields.join(",")}) VALUES(${fields.map(() => "?").join(",")})`,
       ...fields.map((f) => row[f]),
     ]
   }
-  async createDirectory(
-    parentId: string | null,
-    requested: string,
-    reuse = false,
-  ): Promise<EntryRow> {
+  /** Returns the active folder with this name, creating it if absent; parallel callers share one. */
+  async ensureDirectory(parentId: string | null, requested: string): Promise<EntryRow> {
+    const active = () =>
+      this.db.first<EntryRow>(
+        "SELECT * FROM entries WHERE parentId IS ? AND normalizedName=? AND deletedAt IS NULL AND deleting=0",
+        parentId,
+        normalize(requested),
+      )
+    const existing = await active()
+    if (existing?.kind === "directory") return existing
+    if (existing) return this.createDirectory(parentId, requested)
+    const [sql, ...values] = this.insert(
+      makeEntry({ parentId, name: validName(requested), kind: "directory" }),
+      "ignore",
+    )
+    await this.db.run(sql, ...values)
+    const created = await active()
+    if (created?.kind === "directory") return created
+    return this.createDirectory(parentId, requested)
+  }
+  async createDirectory(parentId: string | null, requested: string): Promise<EntryRow> {
     return retry(async () => {
       const revision = await this.db.revision()
       await this.directory(parentId)
-      if (reuse) {
-        const existing = await this.db.first<EntryRow>(
-          "SELECT * FROM entries WHERE parentId IS ? AND normalizedName=? AND deletedAt IS NULL AND deleting=0",
-          parentId,
-          normalize(requested),
-        )
-        if (existing?.kind === "directory") return existing
-      }
       const name = await this.name(parentId, requested)
       const row = makeEntry({ parentId, name, kind: "directory" })
       await this.db.commit(revision, [this.insert(row)])

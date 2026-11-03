@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { previewKindForMime, sanitizeRelativePath, uploadedPreviewKeys } from "@cloudsync/core"
-import { Database, type DatabaseError, type Sqlite } from "@cloudsync/db"
+import { Database, type DatabaseError, type Sqlite, type Statement } from "@cloudsync/db"
 import {
   Breadcrumb,
   BulkResult,
@@ -380,50 +380,55 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
             upload.expiresAt < new Date().toISOString()
           )
             return yield* invalidInput("Upload expired; start it again")
-          if (!upload.previewEntryId) {
-            const object = yield* storage.head(upload.objectKey)
-            if (
-              object.ContentLength !== upload.size ||
-              object.ChecksumSHA256 !== upload.checksumSha256
-            )
-              return yield* new CloudSyncError({
-                code: "UPLOAD_INCOMPLETE",
-                message: "The uploaded bytes did not match the source file",
-              })
-          }
           const manifest = upload.previewManifest
             ? yield* Schema.decodeUnknownEffect(PreviewManifest)(
                 JSON.parse(upload.previewManifest),
               ).pipe(Effect.mapError(() => invalidInput("Invalid preview manifest")))
             : null
           const keys = uploadedPreviewKeys(uploadId)
-          const verified = manifest
-            ? yield* Effect.forEach(
-                ["thumbnail", "preview"] as const,
-                (kind) =>
-                  storage.head(keys[kind]).pipe(
-                    Effect.map(
-                      (o) =>
-                        o.ContentLength === manifest[kind].size &&
-                        o.ChecksumSHA256 === manifest[kind].checksumSha256 &&
-                        o.ContentType === (manifest[kind].mimeType ?? "image/webp"),
-                    ),
-                    Effect.orElseSucceed(() => false),
-                  ),
-                { concurrency: 2 },
-              ).pipe(Effect.map((v) => v.every(Boolean)))
-            : false
+          const [object, verified] = yield* Effect.all(
+            [
+              upload.previewEntryId ? Effect.succeed(null) : storage.head(upload.objectKey),
+              manifest
+                ? Effect.forEach(
+                    ["thumbnail", "preview"] as const,
+                    (kind) =>
+                      storage.head(keys[kind]).pipe(
+                        Effect.map(
+                          (o) =>
+                            o.ContentLength === manifest[kind].size &&
+                            o.ChecksumSHA256 === manifest[kind].checksumSha256 &&
+                            o.ContentType === (manifest[kind].mimeType ?? "image/webp"),
+                        ),
+                        Effect.orElseSucceed(() => false),
+                      ),
+                    { concurrency: 2 },
+                  ).pipe(Effect.map((v) => v.every(Boolean)))
+                : Effect.succeed(false),
+            ],
+            { concurrency: "unbounded" },
+          )
+          if (
+            object &&
+            (object.ContentLength !== upload.size ||
+              object.ChecksumSHA256 !== upload.checksumSha256)
+          )
+            return yield* new CloudSyncError({
+              code: "UPLOAD_INCOMPLETE",
+              message: "The uploaded bytes did not match the source file",
+            })
           if (upload.previewEntryId && !verified)
             return yield* new CloudSyncError({
               code: "UPLOAD_INCOMPLETE",
               message: "The preview bytes did not match the manifest",
             })
+          let attempt = 0
           const row = yield* run("upload.finalize", (db) =>
             retry(async () => {
-              const current = await db.first<UploadRow>(
-                "SELECT * FROM uploads WHERE id=?",
-                uploadId,
-              )
+              const current =
+                attempt++ === 0
+                  ? upload
+                  : await db.first<UploadRow>("SELECT * FROM uploads WHERE id=?", uploadId)
               if (!current) throw notFound()
               if (current.entryId) {
                 const row = await new CatalogStore(db).row(current.entryId)
@@ -431,16 +436,16 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
                 return row
               }
               const store = new CatalogStore(db)
-              let parentId = current.parentId
-              if (!current.previewEntryId) {
-                for (const part of sanitizeRelativePath(current.relativePath).slice(0, -1))
-                  parentId = (await store.createDirectory(parentId, part, true)).id
-              }
-              const revision = await db.revision()
-              await store.directory(parentId)
+              const revision = current.previewEntryId ? await db.revision() : null
               const source = current.previewEntryId
                 ? await store.visible(current.previewEntryId)
                 : null
+              let parentId = current.parentId
+              if (!source) {
+                await store.directory(parentId)
+                for (const part of sanitizeRelativePath(current.relativePath).slice(0, -1))
+                  parentId = (await store.ensureDirectory(parentId, part)).id
+              }
               const name =
                 source?.name ??
                 (await store.name(
@@ -480,7 +485,7 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
                 : current.previewManifest && !verified
                   ? Object.values(keys)
                   : []
-              await db.commit(revision, [
+              const statements: Statement[] = [
                 [
                   "INSERT INTO assertions(value) SELECT coalesce((SELECT CASE WHEN status IN ('pending','uploaded') AND entryId IS NULL THEN 1 ELSE 0 END FROM uploads WHERE id=?),0)",
                   uploadId,
@@ -513,7 +518,12 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
                       ] as const,
                     ]
                   : []),
-              ])
+              ]
+              // A new file needs no catalog-wide revision: the parent trigger and the unique name
+              // index already reject a vanished parent or a taken name, so concurrent uploads into
+              // one folder no longer invalidate each other's commits.
+              if (revision === null) await db.batch(statements)
+              else await db.commit(revision, statements)
               return saved
             }),
           )

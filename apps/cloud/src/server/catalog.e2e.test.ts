@@ -113,6 +113,21 @@ suite("Workers RPC with real local D1 and S3", () => {
     expect(listing.entries.filter((e) => e.name === "Shared")).toHaveLength(1)
     expect(listing.entries[0]?.childCount).toBe(6)
   }, 30_000)
+  it("finalizes a burst of uploads into one new nested folder without conflicts", async () => {
+    const results = await Promise.all(
+      Array.from({ length: 48 }, (_, i) => upload(root.id, `Burst/2026-04/set/${i}.webp`)),
+    )
+    expect(new Set(results.map((r) => r.entry.name)).size).toBe(48)
+    const burst = (await call("catalog.list", { parentId: root.id })).entries.filter(
+      (e) => e.name === "Burst",
+    )
+    expect(burst).toHaveLength(1)
+    const month = (await call("catalog.list", { parentId: burst[0]?.id as string })).entries
+    expect(month.map((e) => e.name)).toEqual(["2026-04"])
+    const set = (await call("catalog.list", { parentId: month[0]?.id as string })).entries
+    expect(set.map((e) => e.name)).toEqual(["set"])
+    expect(set[0]?.childCount).toBe(48)
+  }, 60_000)
   it("rejects opposite moves, pages naturally and searches paths", async () => {
     const a = await call("catalog.createFolder", { parentId: root.id, name: "A" })
     const b = await call("catalog.createFolder", { parentId: root.id, name: "B" })
