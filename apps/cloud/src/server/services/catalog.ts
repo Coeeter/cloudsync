@@ -16,11 +16,12 @@ import {
   SearchResult,
   UploadTicket,
 } from "@cloudsync/domain"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Array as Arr, Context, Effect, Layer, Schema } from "effect"
 import { invalidInput, notFound } from "../errors"
 import {
   CatalogStore,
   type EntryRow,
+  type DirectorySummary,
   makeEntry,
   now,
   retry,
@@ -40,7 +41,11 @@ export interface CatalogShape {
       readonly trashed?: boolean | undefined
     },
   ) => Effect.Effect<DirectoryListing, CatalogFailure>
-  readonly search: (query: string, limit?: number) => Effect.Effect<SearchResponse, CatalogFailure>
+  readonly search: (
+    query: string,
+    limit?: number,
+    parentId?: string | null,
+  ) => Effect.Effect<SearchResponse, CatalogFailure>
   readonly selectionIds: (
     parentId: string | null,
     query?: string,
@@ -111,11 +116,12 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
                 : Effect.fail<CatalogFailure>(error),
             ),
           )
-      const entry = (row: EntryRow) =>
+      const entry = (row: EntryRow, preparedSummary?: DirectorySummary) =>
         Effect.gen(function* () {
           const summary =
             row.kind === "directory"
-              ? yield* run("summary", (db) => new CatalogStore(db).summary(row))
+              ? (preparedSummary ??
+                (yield* run("summary", (db) => new CatalogStore(db).summary(row))))
               : null
           const previewKind = previewKindForMime(row.mimeType)
           return Entry.make({
@@ -145,7 +151,15 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
             contentUrl: row.objectKey ? yield* storage.viewUrl(row.objectKey) : null,
           })
         })
-      const entries = (rows: readonly EntryRow[]) => Effect.forEach(rows, entry, { concurrency: 8 })
+      const entries = (rows: readonly EntryRow[]) =>
+        Effect.gen(function* () {
+          const summaries = yield* run("summaries", (db) =>
+            new CatalogStore(db).summaries(rows.filter((row) => row.kind === "directory")),
+          )
+          return yield* Effect.forEach(rows, (row) => entry(row, summaries.get(row.id)), {
+            concurrency: 8,
+          })
+        })
       const list: CatalogShape["list"] = (parentId, options = {}) =>
         Effect.gen(function* () {
           const cursor: Cursor | null = options.cursor ? yield* decodeCursor(options.cursor) : null
@@ -173,8 +187,11 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
               chain,
             }
           })
+          const rendered = yield* entries(
+            result.chain[0] ? [result.chain[0], ...result.page] : result.page,
+          )
           return DirectoryListing.make({
-            directory: result.chain[0] ? yield* entry(result.chain[0]) : null,
+            directory: result.chain[0] ? (rendered[0] ?? null) : null,
             breadcrumbs: [
               Breadcrumb.make({ id: null, name: options.trashed ? "Recycle Bin" : "CloudSync" }),
               ...result.chain
@@ -182,14 +199,14 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
                 .reverse()
                 .map((e) => Breadcrumb.make({ id: e.id, name: e.name })),
             ],
-            entries: yield* entries(result.page),
+            entries: result.chain[0] ? rendered.slice(1) : rendered,
             nextCursor: result.nextCursor,
           })
         })
-      const search: CatalogShape["search"] = (query, limit = 100) =>
+      const search: CatalogShape["search"] = (query, limit = 100, parentId = null) =>
         Effect.gen(function* () {
           if (!query.trim()) return SearchResponse.make({ results: [], truncated: false })
-          const matches = yield* run("search", (db) => new CatalogStore(db).paths(query))
+          const matches = yield* run("search", (db) => new CatalogStore(db).paths(query, parentId))
           const count = Math.min(200, Math.max(1, limit))
           const rows = yield* run("search.entries", (db) =>
             db.all<EntryRow & { path: string }>(
@@ -197,27 +214,23 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
               JSON.stringify(matches.slice(0, count)),
             ),
           )
-          const results = yield* Effect.forEach(
-            rows,
-            (row) =>
-              entry(row).pipe(
-                Effect.map((e) =>
-                  SearchResult.make({
-                    entry: e,
-                    parentPath: row.path.includes("/")
-                      ? `CloudSync/${row.path.slice(0, row.path.lastIndexOf("/"))}`
-                      : "CloudSync",
-                  }),
-                ),
-              ),
-            { concurrency: 8 },
-          )
+          const rendered = yield* entries(rows)
+          const results = Arr.zip(rows, rendered).map(([row, entry]) => {
+            const path = row.path
+            return SearchResult.make({
+              entry,
+              parentPath: path.includes("/")
+                ? `CloudSync/${path.slice(0, path.lastIndexOf("/"))}`
+                : "CloudSync",
+            })
+          })
           return SearchResponse.make({ results, truncated: matches.length > count })
         })
       const selectionIds: CatalogShape["selectionIds"] = (parentId, query, trashed = false) =>
         run("selection", async (db) => {
           const store = new CatalogStore(db)
-          if (query?.trim() && !trashed) return (await store.paths(query)).map((e) => e.id)
+          if (query?.trim() && !trashed)
+            return (await store.paths(query, parentId)).map((e) => e.id)
           if (parentId) {
             if (trashed) {
               const e = await store.row(parentId)

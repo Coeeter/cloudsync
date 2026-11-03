@@ -164,7 +164,11 @@ export const CloudSyncRpcs = RpcGroup.make(
     error: CloudSyncError,
   }),
   Rpc.make("catalog.search", {
-    payload: { query: Schema.String, limit: Schema.optional(Schema.Finite) },
+    payload: {
+      query: Schema.String,
+      limit: Schema.optional(Schema.Finite),
+      parentId: Schema.optional(Schema.NullOr(Schema.String)),
+    },
     success: SearchResponse,
     error: CloudSyncError,
   }),

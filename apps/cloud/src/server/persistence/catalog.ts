@@ -5,6 +5,11 @@ import { CloudSyncError, type BulkAction } from "@cloudsync/domain"
 import { invalidInput, notFound } from "../errors"
 import { compareEntries, compareNames } from "../services/ordering"
 
+export interface DirectorySummary {
+  readonly count: number
+  readonly cover: string | null
+}
+
 export interface EntryRow {
   id: string
   parentId: string | null
@@ -438,32 +443,133 @@ export class CatalogStore {
       return { succeeded, failed }
     })
   }
-  async summary(directory: EntryRow) {
-    const children = await this.children(directory.id, !!directory.deletedAt)
-    const direct = children.sort(compareEntries).find((e) => e.thumbnailKey)
-    if (direct) return { count: children.length, cover: direct.thumbnailKey }
-    const images = await this.db.all<{ thumbnailKey: string; path: string; depth: number }>(
-      `WITH RECURSIVE tree AS (
-   SELECT e.*,e.name AS path,0 AS depth FROM entries e WHERE parentId=? AND deleting=0 AND (deletedAt IS NULL OR trashRootId=?)
-   UNION ALL SELECT e.*,t.path||'/'||e.name,t.depth+1 FROM entries e JOIN tree t ON e.parentId=t.id WHERE e.deleting=0 AND (e.deletedAt IS NULL OR e.trashRootId=?)
-  ) SELECT thumbnailKey,path,depth FROM tree WHERE thumbnailKey IS NOT NULL AND mimeType LIKE 'image/%'`,
-      directory.id,
-      directory.trashRootId,
-      directory.trashRootId,
-    )
-    images.sort((a, b) => a.depth - b.depth || compareNames(a.path, b.path))
-    return { count: children.length, cover: images[0]?.thumbnailKey ?? null }
+  async summary(directory: EntryRow): Promise<DirectorySummary> {
+    return (await this.summaries([directory])).get(directory.id) ?? { count: 0, cover: null }
   }
-  async paths(query: string) {
-    const rows = await this.db.all<{ id: string; path: string }>(`WITH RECURSIVE paths AS (
-      SELECT id,parentId,name,name AS path FROM entries WHERE parentId IS NULL AND deletedAt IS NULL AND deleting=0
-      UNION ALL SELECT e.id,e.parentId,e.name,p.path||'/'||e.name FROM entries e JOIN paths p ON e.parentId=p.id WHERE e.deletedAt IS NULL AND e.deleting=0
-    ) SELECT id,path FROM paths`)
-    const needle = query.trim().toLocaleLowerCase()
+  async summaries(directories: readonly EntryRow[]): Promise<Map<string, DirectorySummary>> {
+    const summaries = new Map<string, DirectorySummary>()
+    if (!directories.length) return summaries
+    const roots = directories.map((row) => ({
+      id: row.id,
+      rootId: row.id,
+      path: "",
+      trashed: !!row.deletedAt,
+      hasStoredCover: !!row.thumbnailKey,
+      trashRootId: row.trashRootId,
+    }))
+    const counts = await this.db.all<{ id: string; count: number }>(
+      `WITH roots AS MATERIALIZED (
+         SELECT json_extract(value,'$.id') AS id,json_extract(value,'$.trashed') AS trashed FROM json_each(?)
+       ) SELECT r.id,COUNT(e.id) AS count FROM roots r LEFT JOIN entries e ON e.parentId=r.id
+       AND e.deleting=0 AND (e.deletedAt IS NULL OR r.trashed=1) GROUP BY r.id`,
+      JSON.stringify(roots),
+    )
+    for (const row of counts) summaries.set(row.id, { count: row.count, cover: null })
+    let frontier = roots.filter(
+      (root) => !root.hasStoredCover && (summaries.get(root.id)?.count ?? 0) > 0,
+    )
+    const covers = new Map<
+      string,
+      { id: string; name: string; kind: EntryRow["kind"]; path: string }
+    >()
+    let direct = true
+    while (frontier.length) {
+      // Group compact candidate tuples by parent. Repeating full paths and thumbnail keys for
+      // every image made the database response much larger than the listing itself.
+      const groups = await this.db.all<{ parentId: string; candidates: string }>(
+        `WITH frontier AS MATERIALIZED (
+          SELECT json_extract(value,'$.id') AS id,json_extract(value,'$.trashed') AS trashed,
+            json_extract(value,'$.trashRootId') AS trashRootId FROM json_each(?)
+         ) SELECT e.parentId,json_group_array(json_array(e.id,e.name,e.kind,e.thumbnailKey IS NOT NULL${direct ? "" : " AND e.mimeType LIKE 'image/%'"},
+            e.deletedAt IS NULL OR e.trashRootId=f.trashRootId)) AS candidates
+         FROM frontier f JOIN entries e ON e.parentId=f.id
+         WHERE e.deleting=0 AND (e.deletedAt IS NULL OR ${direct ? "f.trashed=1" : "e.trashRootId=f.trashRootId"})
+         AND (e.kind='directory' OR (e.thumbnailKey IS NOT NULL${direct ? "" : " AND e.mimeType LIKE 'image/%'"}))
+         GROUP BY e.parentId`,
+        JSON.stringify(frontier),
+      )
+      const groupsByParent = new Map(groups.map((group) => [group.parentId, group]))
+      const next: typeof frontier = []
+      for (const parent of frontier) {
+        const group = groupsByParent.get(parent.id)
+        if (!group) continue
+        const children = JSON.parse(group.candidates) as [
+          id: string,
+          name: string,
+          kind: EntryRow["kind"],
+          hasThumbnail: number,
+          canDescend: number,
+        ][]
+        for (const [id, name, kind, hasThumbnail, canDescend] of children) {
+          const candidate = { id, name, kind, path: parent.path + name }
+          if (hasThumbnail) {
+            const previous = covers.get(parent.rootId)
+            if (
+              !previous ||
+              (direct
+                ? compareEntries(candidate, previous)
+                : compareNames(candidate.path, previous.path)) < 0
+            )
+              covers.set(parent.rootId, candidate)
+          }
+          if (kind === "directory" && canDescend)
+            next.push({ ...parent, id, path: `${candidate.path}/` })
+        }
+      }
+      frontier = next.filter((row) => !covers.has(row.rootId))
+      direct = false
+    }
+    if (covers.size) {
+      const keys = await this.db.all<{ id: string; thumbnailKey: string }>(
+        "SELECT id,thumbnailKey FROM entries WHERE id IN (SELECT value FROM json_each(?))",
+        JSON.stringify([...covers.values()].map((row) => row.id)),
+      )
+      const byId = new Map(keys.map((row) => [row.id, row.thumbnailKey]))
+      for (const [rootId, cover] of covers)
+        summaries.set(rootId, {
+          count: summaries.get(rootId)?.count ?? 0,
+          cover: byId.get(cover.id) ?? null,
+        })
+    }
+    return summaries
+  }
+  async paths(query: string, parentId: string | null = null) {
+    const needle = normalize(query.trim())
+    if (!needle) return []
+    const chain = parentId ? await this.chain(parentId) : []
+    if (
+      parentId &&
+      (!chain[0] ||
+        chain[0].kind !== "directory" ||
+        chain.some((row) => row.deletedAt || row.deleting))
+    )
+      throw notFound("Search folder not found")
+    const rows = await this.db.all<{ id: string; path: string }>(
+      `WITH RECURSIVE paths AS (
+        SELECT id,name AS path,normalizedName AS searchPath,instr(normalizedName,?)>0 AS matched
+        FROM entries WHERE parentId IS ? AND deletedAt IS NULL AND deleting=0
+        UNION ALL
+        SELECT e.id,p.path||'/'||e.name,p.searchPath||'/'||e.normalizedName,
+          instr(p.searchPath||'/'||e.normalizedName,?)>0
+        FROM entries e JOIN paths p ON e.parentId=p.id
+        WHERE p.matched=0 AND e.deletedAt IS NULL AND e.deleting=0
+      ) SELECT id,path FROM paths WHERE matched=1`,
+      needle,
+      parentId,
+      needle,
+    )
+    const prefix = chain.length
+      ? `${chain
+          .slice()
+          .reverse()
+          .map((row) => row.name)
+          .join("/")}/`
+      : ""
     return rows
-      .filter((e) => e.path.toLocaleLowerCase().includes(needle))
+      .map((row) => ({ id: row.id, path: prefix + row.path }))
       .sort((a, b) => compareNames(a.path, b.path) || a.id.localeCompare(b.id))
   }
+
   async roots(ids: readonly string[], allowMissing = false) {
     const unique = [...new Set(ids)]
     const selected = new Set(unique)

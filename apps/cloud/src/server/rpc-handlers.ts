@@ -72,8 +72,8 @@ export const rpcHandlers = Effect.gen(function* () {
         .pipe(Effect.catch((error) => asRpcError(Effect.fail(error)))),
     "catalog.list": ({ parentId, cursor, limit, trashed }, options) =>
       protect(options.headers, catalog.list(parentId, { cursor, limit, trashed })),
-    "catalog.search": ({ query, limit }, options) =>
-      protect(options.headers, catalog.search(query, limit)),
+    "catalog.search": ({ query, limit, parentId }, options) =>
+      protect(options.headers, catalog.search(query, limit, parentId)),
     "catalog.selectionIds": ({ parentId, query, trashed }, options) =>
       protect(options.headers, catalog.selectionIds(parentId, query, trashed)),
     "catalog.bulk": ({ ids, action, parentId }, options) =>

@@ -109,8 +109,11 @@ import { useAtomValue } from "../client/use-atom"
 import { toggleSelection } from "../client/selection"
 
 export const Route = createFileRoute("/")({
-  validateSearch: (search: Record<string, unknown>) => ({
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { folder: string | undefined; recycle: boolean | undefined; q?: string } => ({
     folder: typeof search.folder === "string" && search.folder ? search.folder : undefined,
+    q: typeof search.q === "string" && search.q.trim() ? search.q : undefined,
     recycle: search.recycle === true || search.recycle === "true" ? true : undefined,
   }),
   // The catalog is only reachable with the browser's session cookie.
@@ -118,7 +121,7 @@ export const Route = createFileRoute("/")({
   loaderDeps: ({ search }) => search,
   loader: ({ deps, preload }) => {
     // Hovering or focusing a folder link preloads it without leaving the search results.
-    if (!preload) registry.set(searchQueryAtom, "")
+    if (!preload) registry.set(searchQueryAtom, deps.q ?? "")
     return visit(deps.folder ?? null, deps.recycle === true)
   },
   pendingComponent: CheckingScreen,
@@ -156,7 +159,7 @@ function FileBrowser() {
   )
   const query = useAtomValue(searchQueryAtom)
   const debouncedQuery = useAtomValue(debouncedSearchQueryAtom)
-  const search = useAtomValue(searchAtom)
+  const search = useAtomValue(searchAtom(folder))
   const error = useAtomValue(errorAtom)
   const progress = useAtomValue(uploadProgressAtom)
   const dragActive = useAtomValue(dragActiveAtom)
@@ -629,11 +632,30 @@ function FileBrowser() {
         </p>
       ) : null}
       {searching ? (
-        <p className="mb-4 text-sm text-muted-foreground">
-          {searchLoading
-            ? `Searching for “${query.trim()}”…`
-            : `${searchResults.length}${searchTruncated ? "+" : ""} result${searchResults.length === 1 && !searchTruncated ? "" : "s"} for “${query.trim()}”${searchTruncated ? " · showing the first 100" : ""}`}
-        </p>
+        <div
+          className="mb-4 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm text-muted-foreground"
+          aria-live="polite"
+        >
+          <span>
+            {searchLoading
+              ? `Searching for “${query.trim()}”…`
+              : `${searchResults.length}${searchTruncated ? "+" : ""} result${searchResults.length === 1 && !searchTruncated ? "" : "s"} for “${query.trim()}”${searchTruncated ? " · showing the first 100" : ""}`}
+          </span>
+          {folder ? (
+            <span className="inline-flex flex-wrap items-baseline gap-x-2">
+              <span>Searching in {current.directory?.name ?? "this folder"}</span>
+              <Link
+                to="/"
+                search={{ folder: undefined, recycle: undefined, q: query.trim() }}
+                className="text-foreground underline underline-offset-4 hover:text-muted-foreground"
+              >
+                Search globally instead
+              </Link>
+            </span>
+          ) : (
+            <span>Searching all folders</span>
+          )}
+        </div>
       ) : null}
 
       {entries.length > 0 ? (

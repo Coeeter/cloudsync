@@ -164,13 +164,15 @@ export const moveFolderAtom = Atom.family((parentId: string | null) =>
   ),
 )
 
-export const searchAtom = CloudSync.runtime
-  .atom((get) => {
-    const query = get(debouncedSearchQueryAtom).trim()
-    if (!query) return Effect.succeed(null)
-    return CloudSync.use((client) => client("catalog.search", { query, limit: 100 }))
-  })
-  .pipe(Atom.withReactivity(catalogKeys))
+export const searchAtom = Atom.family((parentId: string | null) =>
+  CloudSync.runtime
+    .atom((get) => {
+      const query = get(debouncedSearchQueryAtom).trim()
+      if (!query) return Effect.succeed(null)
+      return CloudSync.use((client) => client("catalog.search", { query, limit: 100, parentId }))
+    })
+    .pipe(Atom.withReactivity(catalogKeys)),
+)
 
 export interface FolderView {
   readonly directory: Entry | null
@@ -242,23 +244,38 @@ export const recycleViewAtom = Atom.family((parentId: string | null) =>
 )
 
 /** Route loader: resolves once the destination can render, so scroll restoration has content. */
-export const visit = (folder: string | null, recycle: boolean) =>
-  Effect.runPromise(
-    Effect.gen(function* () {
-      const session = yield* AtomRegistry.getResult(registry, sessionAtom, {
-        suspendOnWaiting: true,
-      }).pipe(Effect.option)
-      if (Option.isNone(session)) return
-      if (!recycle) return yield* revalidate(folderAtom(folder))
-      if (folder === null) return yield* revalidate(recycleBinAtom)
-      return yield* revalidate(trashedFolderAtom(folder))
-    }),
+export const visit = (folder: string | null, recycle: boolean) => {
+  const listing = !recycle
+    ? revalidate(folderAtom(folder))
+    : folder === null
+      ? revalidate(recycleBinAtom)
+      : revalidate(trashedFolderAtom(folder))
+  // Each catalog RPC authenticates independently. Start it now and retain its result in the
+  // same folder atom the page will subscribe to after the session check finishes.
+  return Effect.runPromise(
+    Effect.all(
+      [
+        AtomRegistry.getResult(registry, sessionAtom, { suspendOnWaiting: true }).pipe(
+          Effect.option,
+        ),
+        listing,
+      ],
+      { concurrency: "unbounded", discard: true },
+    ),
   )
+}
 
-// A cached atom answers immediately with its previous value while the refresh runs behind it.
+// Intent preloading and navigation share pending and freshly prepared results. Older cached
+// data still renders immediately while revalidating; mutations and focus refresh independently.
 const revalidate = <A, E>(atom: Atom.Atom<AsyncResult.AsyncResult<A, E>>) =>
   Effect.suspend(() => {
-    if (!AsyncResult.isInitial(registry.get(atom))) registry.refresh(atom)
+    const result = registry.get(atom)
+    if (
+      !result.waiting &&
+      (AsyncResult.isFailure(result) ||
+        (AsyncResult.isSuccess(result) && Date.now() - result.timestamp > 5000))
+    )
+      registry.refresh(atom)
     return AtomRegistry.getResult(registry, atom).pipe(Effect.ignore)
   })
 
