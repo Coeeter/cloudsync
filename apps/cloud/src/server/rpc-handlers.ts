@@ -32,7 +32,9 @@ export const rpcHandlers = Effect.gen(function* () {
     operation: Effect.Effect<A, E>,
   ): Effect.Effect<A, CloudSyncError> =>
     Effect.gen(function* () {
+      const start = Date.now()
       yield* auth.authenticate(headers)
+      console.log(`[DEBUG-fin] auth ${Date.now() - start}ms`)
       return yield* operation
     }).pipe(
       Effect.catch((error) => asRpcError(Effect.fail(error))),
@@ -67,7 +69,16 @@ export const rpcHandlers = Effect.gen(function* () {
     "upload.beginPreview": ({ id, previews }, options) =>
       protect(options.headers, catalog.beginPreview(id, previews)),
     "upload.finalize": ({ uploadId }, options) =>
-      protect(options.headers, catalog.finalizeUpload(uploadId)),
+      Effect.suspend(() => {
+        const start = Date.now()
+        return protect(options.headers, catalog.finalizeUpload(uploadId)).pipe(
+          Effect.ensuring(
+            Effect.sync(() =>
+              console.log(`[DEBUG-fin] ${uploadId.slice(0, 8)} total ${Date.now() - start}ms`),
+            ),
+          ),
+        )
+      }),
     "download.file": ({ id }, options) => protect(options.headers, catalog.download(id)),
     "download.archive": ({ ids }, options) => protect(options.headers, archives.create(ids)),
     "download.status": ({ id }, options) => protect(options.headers, archives.status(id)),

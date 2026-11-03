@@ -95,6 +95,16 @@ interface UploadRow {
   expiresAt: string
 }
 const expiry = () => new Date(Date.now() + 15 * 60_000).toISOString()
+const debugTimed = <A, E, R>(label: string, effect: Effect.Effect<A, E, R>) =>
+  Effect.suspend(() => {
+    const start = Date.now()
+    return effect.pipe(
+      Effect.ensuring(
+        Effect.sync(() => console.log(`[DEBUG-fin] ${label} ${Date.now() - start}ms`)),
+      ),
+    )
+  })
+
 export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsync/cloud/Catalog") {
   static readonly layer = Layer.effect(
     Catalog,
@@ -364,8 +374,12 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
         })
       const finalizeUpload: CatalogShape["finalizeUpload"] = (uploadId) =>
         Effect.gen(function* () {
-          const upload = yield* run("upload.find", (db) =>
-            db.first<UploadRow>("SELECT * FROM uploads WHERE id=?", uploadId),
+          const id8 = uploadId.slice(0, 8)
+          const upload = yield* debugTimed(
+            `${id8} find`,
+            run("upload.find", (db) =>
+              db.first<UploadRow>("SELECT * FROM uploads WHERE id=?", uploadId),
+            ),
           )
           if (!upload) return yield* notFound("Upload not found")
           if (upload.entryId) {
@@ -381,7 +395,7 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
           )
             return yield* invalidInput("Upload expired; start it again")
           if (!upload.previewEntryId) {
-            const object = yield* storage.head(upload.objectKey)
+            const object = yield* debugTimed(`${id8} head.original`, storage.head(upload.objectKey))
             if (
               object.ContentLength !== upload.size ||
               object.ChecksumSHA256 !== upload.checksumSha256
@@ -401,7 +415,7 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
             ? yield* Effect.forEach(
                 ["thumbnail", "preview"] as const,
                 (kind) =>
-                  storage.head(keys[kind]).pipe(
+                  debugTimed(`${id8} head.${kind}`, storage.head(keys[kind])).pipe(
                     Effect.map(
                       (o) =>
                         o.ContentLength === manifest[kind].size &&
@@ -418,104 +432,110 @@ export class Catalog extends Context.Service<Catalog, CatalogShape>()("@cloudsyn
               code: "UPLOAD_INCOMPLETE",
               message: "The preview bytes did not match the manifest",
             })
-          const row = yield* run("upload.finalize", (db) =>
-            retry(async () => {
-              const current = await db.first<UploadRow>(
-                "SELECT * FROM uploads WHERE id=?",
-                uploadId,
-              )
-              if (!current) throw notFound()
-              if (current.entryId) {
-                const row = await new CatalogStore(db).row(current.entryId)
-                if (!row) throw notFound()
-                return row
-              }
-              const store = new CatalogStore(db)
-              let parentId = current.parentId
-              if (!current.previewEntryId) {
-                for (const part of sanitizeRelativePath(current.relativePath).slice(0, -1))
-                  parentId = (await store.createDirectory(parentId, part, true)).id
-              }
-              const revision = await db.revision()
-              await store.directory(parentId)
-              const source = current.previewEntryId
-                ? await store.visible(current.previewEntryId)
-                : null
-              const name =
-                source?.name ??
-                (await store.name(
-                  parentId,
-                  sanitizeRelativePath(current.relativePath).at(-1) as string,
-                ))
-              const row =
-                source ??
-                makeEntry({
-                  parentId,
-                  name,
-                  kind: "file",
-                  objectKey: current.objectKey,
-                  size: current.size,
-                  mimeType: current.mimeType,
-                  checksumSha256: current.checksumSha256,
-                  modifiedAt: current.modifiedAt,
-                })
-              const saved = {
-                ...row,
-                thumbnailKey: verified ? keys.thumbnail : row.thumbnailKey,
-                previewKey: verified ? keys.preview : row.previewKey,
-                isAnimated: verified
-                  ? manifest?.isAnimated === null
-                    ? null
-                    : Number(manifest?.isAnimated)
-                  : row.isAnimated,
-                previewError: verified
-                  ? null
-                  : previewKindForMime(row.mimeType) === "none"
-                    ? null
-                    : "No usable client preview; retry in the browser",
-                updatedAt: now(),
-              }
-              const cleanup = source
-                ? [source.thumbnailKey, source.previewKey].filter((key): key is string => !!key)
-                : current.previewManifest && !verified
-                  ? Object.values(keys)
-                  : []
-              await db.commit(revision, [
-                [
-                  "INSERT INTO assertions(value) SELECT coalesce((SELECT CASE WHEN status IN ('pending','uploaded') AND entryId IS NULL THEN 1 ELSE 0 END FROM uploads WHERE id=?),0)",
+          let attempts = 0
+          const row = yield* debugTimed(
+            `${id8} commit`,
+            run("upload.finalize", (db) =>
+              retry(async () => {
+                attempts++
+                console.log(`[DEBUG-fin] ${id8} commit.attempt ${attempts}`)
+                const current = await db.first<UploadRow>(
+                  "SELECT * FROM uploads WHERE id=?",
                   uploadId,
-                ],
-                ...(source
-                  ? [
-                      [
-                        "UPDATE entries SET thumbnailKey=?,previewKey=?,isAnimated=?,previewError=NULL,updatedAt=? WHERE id=?",
-                        saved.thumbnailKey,
-                        saved.previewKey,
-                        saved.isAnimated,
-                        saved.updatedAt,
-                        row.id,
-                      ] as const,
-                    ]
-                  : [store.insert(saved)]),
-                [
-                  "UPDATE uploads SET status='finalized',entryId=?,updatedAt=? WHERE id=?",
-                  row.id,
-                  now(),
-                  uploadId,
-                ],
-                ...(cleanup.length
-                  ? [
-                      [
-                        "INSERT INTO cleanup(id,objectKeys,createdAt) VALUES(?,?,?)",
-                        randomUUID(),
-                        JSON.stringify(cleanup),
-                        now(),
-                      ] as const,
-                    ]
-                  : []),
-              ])
-              return saved
-            }),
+                )
+                if (!current) throw notFound()
+                if (current.entryId) {
+                  const row = await new CatalogStore(db).row(current.entryId)
+                  if (!row) throw notFound()
+                  return row
+                }
+                const store = new CatalogStore(db)
+                let parentId = current.parentId
+                if (!current.previewEntryId) {
+                  for (const part of sanitizeRelativePath(current.relativePath).slice(0, -1))
+                    parentId = (await store.createDirectory(parentId, part, true)).id
+                }
+                const revision = await db.revision()
+                await store.directory(parentId)
+                const source = current.previewEntryId
+                  ? await store.visible(current.previewEntryId)
+                  : null
+                const name =
+                  source?.name ??
+                  (await store.name(
+                    parentId,
+                    sanitizeRelativePath(current.relativePath).at(-1) as string,
+                  ))
+                const row =
+                  source ??
+                  makeEntry({
+                    parentId,
+                    name,
+                    kind: "file",
+                    objectKey: current.objectKey,
+                    size: current.size,
+                    mimeType: current.mimeType,
+                    checksumSha256: current.checksumSha256,
+                    modifiedAt: current.modifiedAt,
+                  })
+                const saved = {
+                  ...row,
+                  thumbnailKey: verified ? keys.thumbnail : row.thumbnailKey,
+                  previewKey: verified ? keys.preview : row.previewKey,
+                  isAnimated: verified
+                    ? manifest?.isAnimated === null
+                      ? null
+                      : Number(manifest?.isAnimated)
+                    : row.isAnimated,
+                  previewError: verified
+                    ? null
+                    : previewKindForMime(row.mimeType) === "none"
+                      ? null
+                      : "No usable client preview; retry in the browser",
+                  updatedAt: now(),
+                }
+                const cleanup = source
+                  ? [source.thumbnailKey, source.previewKey].filter((key): key is string => !!key)
+                  : current.previewManifest && !verified
+                    ? Object.values(keys)
+                    : []
+                await db.commit(revision, [
+                  [
+                    "INSERT INTO assertions(value) SELECT coalesce((SELECT CASE WHEN status IN ('pending','uploaded') AND entryId IS NULL THEN 1 ELSE 0 END FROM uploads WHERE id=?),0)",
+                    uploadId,
+                  ],
+                  ...(source
+                    ? [
+                        [
+                          "UPDATE entries SET thumbnailKey=?,previewKey=?,isAnimated=?,previewError=NULL,updatedAt=? WHERE id=?",
+                          saved.thumbnailKey,
+                          saved.previewKey,
+                          saved.isAnimated,
+                          saved.updatedAt,
+                          row.id,
+                        ] as const,
+                      ]
+                    : [store.insert(saved)]),
+                  [
+                    "UPDATE uploads SET status='finalized',entryId=?,updatedAt=? WHERE id=?",
+                    row.id,
+                    now(),
+                    uploadId,
+                  ],
+                  ...(cleanup.length
+                    ? [
+                        [
+                          "INSERT INTO cleanup(id,objectKeys,createdAt) VALUES(?,?,?)",
+                          randomUUID(),
+                          JSON.stringify(cleanup),
+                          now(),
+                        ] as const,
+                      ]
+                    : []),
+                ])
+                return saved
+              }),
+            ),
           )
           return yield* entry(row)
         })
