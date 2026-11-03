@@ -1,9 +1,10 @@
-import { CloudSyncError, CloudSyncRpcs } from "@cloudsync/domain"
+import { CloudSyncError, CloudSyncRpcs, MAX_UPLOAD_BATCH } from "@cloudsync/domain"
 import { Effect, Schema } from "effect"
 import type { Headers } from "effect/unstable/http"
 import { Auth } from "./services/auth"
 import { Catalog } from "./services/catalog"
 import { Archives } from "./services/archives"
+import { invalidInput } from "./errors"
 
 function asRpcError<E>(effect: Effect.Effect<never, E>): Effect.Effect<never, CloudSyncError> {
   return effect.pipe(
@@ -20,6 +21,31 @@ function asRpcError<E>(effect: Effect.Effect<never, E>): Effect.Effect<never, Cl
         : new CloudSyncError({ code: "INTERNAL", message: "The operation could not be completed" }),
     ),
   )
+}
+
+function settle<A, E>(
+  effect: Effect.Effect<A, E>,
+): Effect.Effect<{ readonly value: A } | { readonly error: CloudSyncError }> {
+  return effect.pipe(
+    Effect.map((value) => ({ value })),
+    Effect.catch((error) =>
+      asRpcError(Effect.fail(error)).pipe(
+        Effect.catch((rpcError) => Effect.succeed({ error: rpcError })),
+      ),
+    ),
+  )
+}
+
+function eachUpload<I, A, E>(
+  items: ReadonlyArray<I>,
+  operation: (item: I) => Effect.Effect<A, E>,
+): Effect.Effect<
+  ReadonlyArray<{ readonly value: A } | { readonly error: CloudSyncError }>,
+  CloudSyncError
+> {
+  return items.length > MAX_UPLOAD_BATCH
+    ? Effect.fail(invalidInput(`At most ${MAX_UPLOAD_BATCH} uploads per batch`))
+    : Effect.forEach(items, (item) => settle(operation(item)), { concurrency: 10 })
 }
 
 export const rpcHandlers = Effect.gen(function* () {
@@ -68,6 +94,20 @@ export const rpcHandlers = Effect.gen(function* () {
       protect(options.headers, catalog.beginPreview(id, previews)),
     "upload.finalize": ({ uploadId }, options) =>
       protect(options.headers, catalog.finalizeUpload(uploadId)),
+    "upload.beginMany": ({ uploads }, options) =>
+      protect(
+        options.headers,
+        eachUpload(uploads, catalog.beginUpload).pipe(
+          Effect.map((results) => results.map((r) => ("value" in r ? { ticket: r.value } : r))),
+        ),
+      ),
+    "upload.finalizeMany": ({ uploadIds }, options) =>
+      protect(
+        options.headers,
+        eachUpload(uploadIds, catalog.finalizeUpload).pipe(
+          Effect.map((results) => results.map((r) => ("value" in r ? { entry: r.value } : r))),
+        ),
+      ),
     "download.file": ({ id }, options) => protect(options.headers, catalog.download(id)),
     "download.archive": ({ ids }, options) => protect(options.headers, archives.create(ids)),
     "download.status": ({ id }, options) => protect(options.headers, archives.status(id)),

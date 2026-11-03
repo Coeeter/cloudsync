@@ -127,6 +127,27 @@ export class CloudSyncError extends Schema.TaggedError<CloudSyncError>()("CloudS
   message: Schema.String,
 }) {}
 
+export const UploadRequest = Schema.Struct({
+  parentId: Schema.NullOr(Schema.String),
+  relativePath: Schema.String,
+  size: Schema.Finite,
+  mimeType: Schema.String,
+  checksumSha256: Schema.String,
+  modifiedAt: Schema.String,
+  previews: Schema.optional(PreviewManifest),
+})
+
+/** The batch RPCs answer each item in request order, so one bad file does not fail its batch. */
+export const MAX_UPLOAD_BATCH = 100
+export const BeganUpload = Schema.Struct({
+  ticket: Schema.optional(UploadTicket),
+  error: Schema.optional(CloudSyncError),
+})
+export const FinalizedUpload = Schema.Struct({
+  entry: Schema.optional(Entry),
+  error: Schema.optional(CloudSyncError),
+})
+
 export const CloudSyncRpcs = RpcGroup.make(
   Rpc.make("auth.session", {
     success: Session,
@@ -205,16 +226,13 @@ export const CloudSyncRpcs = RpcGroup.make(
     error: CloudSyncError,
   }),
   Rpc.make("upload.begin", {
-    payload: {
-      parentId: Schema.NullOr(Schema.String),
-      relativePath: Schema.String,
-      size: Schema.Finite,
-      mimeType: Schema.String,
-      checksumSha256: Schema.String,
-      modifiedAt: Schema.String,
-      previews: Schema.optional(PreviewManifest),
-    },
+    payload: UploadRequest.fields,
     success: UploadTicket,
+    error: CloudSyncError,
+  }),
+  Rpc.make("upload.beginMany", {
+    payload: { uploads: Schema.Array(UploadRequest) },
+    success: Schema.Array(BeganUpload),
     error: CloudSyncError,
   }),
   Rpc.make("upload.beginPreview", {
@@ -225,6 +243,11 @@ export const CloudSyncRpcs = RpcGroup.make(
   Rpc.make("upload.finalize", {
     payload: { uploadId: Schema.String },
     success: Entry,
+    error: CloudSyncError,
+  }),
+  Rpc.make("upload.finalizeMany", {
+    payload: { uploadIds: Schema.Array(Schema.String) },
+    success: Schema.Array(FinalizedUpload),
     error: CloudSyncError,
   }),
   Rpc.make("download.file", {

@@ -128,6 +128,51 @@ suite("Workers RPC with real local D1 and S3", () => {
     expect(set.map((e) => e.name)).toEqual(["set"])
     expect(set[0]?.childCount).toBe(48)
   }, 60_000)
+  it("begins and finalizes uploads in batches, failing only the bad item", async () => {
+    const files = Array.from({ length: 60 }, (_, i) => new Uint8Array([i, i + 1, i + 2]))
+    const uploads = files.map((bytes, i) => ({
+      parentId: root.id,
+      relativePath: `Batch/${i}.dat`,
+      size: bytes.length,
+      mimeType: "application/octet-stream",
+      checksumSha256: createHash("sha256").update(bytes).digest("base64"),
+      modifiedAt: new Date().toISOString(),
+    }))
+    const began = await call("upload.beginMany", {
+      uploads: [
+        ...uploads,
+        { ...uploads[0], relativePath: "Batch/bad.dat", checksumSha256: "x" },
+      ] as never,
+    })
+    expect(began).toHaveLength(61)
+    expect(began[60]?.error?.code).toBe("INVALID_INPUT")
+    const tickets = began.slice(0, 60).map((b) => b.ticket)
+    expect(tickets.every(Boolean)).toBe(true)
+    await Promise.all(
+      tickets.map(async (ticket, i) => {
+        const response = await fetch(ticket?.url as string, {
+          method: "PUT",
+          headers: ticket?.headers,
+          body: files[i],
+        })
+        expect(response.ok).toBe(true)
+      }),
+    )
+    const finalized = await call("upload.finalizeMany", {
+      uploadIds: [...tickets.map((t) => t?.uploadId as string), "missing-upload"],
+    })
+    expect(finalized.slice(0, 60).map((f) => f.entry?.name)).toEqual(
+      uploads.map((_, i) => `${i}.dat`),
+    )
+    expect(finalized[60]?.error?.code).toBe("NOT_FOUND")
+    const batch = (await call("catalog.list", { parentId: root.id })).entries.find(
+      (e) => e.name === "Batch",
+    )
+    expect(batch?.childCount).toBe(60)
+    await expect(
+      call("upload.finalizeMany", { uploadIds: Array.from({ length: 101 }, () => "x") }),
+    ).rejects.toMatchObject({ code: "INVALID_INPUT" })
+  }, 60_000)
   it("rejects opposite moves, pages naturally and searches paths", async () => {
     const a = await call("catalog.createFolder", { parentId: root.id, name: "A" })
     const b = await call("catalog.createFolder", { parentId: root.id, name: "B" })

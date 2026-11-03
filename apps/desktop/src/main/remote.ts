@@ -3,12 +3,23 @@ import {
   CloudSyncError,
   CloudSyncRpcs,
   type Entry,
+  MAX_UPLOAD_BATCH,
   type Session,
   type UploadTicket,
   type ObjectUploadTicket,
 } from "@cloudsync/domain"
 import { NodeHttpClient } from "@effect/platform-node"
-import { Context, Effect, FileSystem, Layer, Schedule, Schema } from "effect"
+import {
+  Context,
+  Effect,
+  Exit,
+  FileSystem,
+  Layer,
+  Request,
+  RequestResolver,
+  Schedule,
+  Schema,
+} from "effect"
 import { HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { RpcClient, type RpcClientError } from "effect/unstable/rpc"
 import { DesktopConfig } from "./config"
@@ -55,6 +66,21 @@ const remoteError = (operation: string) => (cause: unknown) =>
     cause,
   })
 
+class BeginUpload extends Request.Class<
+  { readonly token: string; readonly upload: PreparedUpload },
+  UploadTicket,
+  RemoteError
+> {}
+class FinalizeUpload extends Request.Class<
+  { readonly token: string; readonly uploadId: string },
+  Entry,
+  RemoteError
+> {}
+
+// Each file's RPCs cross a slow route to the Worker, so concurrent files share one request.
+// The window is short next to that round trip and long enough to collect a parallel wave.
+const BATCH_WINDOW = "50 millis"
+
 export class Remote extends Context.Service<Remote, RemoteShape>()("@cloudsync/desktop/Remote") {
   static readonly layer = Layer.effect(
     Remote,
@@ -85,12 +111,61 @@ export class Remote extends Context.Service<Remote, RemoteShape>()("@cloudsync/d
             while: (error) => !error.unauthorized && !Schema.is(CloudSyncError)(error.cause),
           }),
         )
+      // One answer per item in request order; a missing answer fails just that file.
+      const answer = <A>(
+        operation: string,
+        item: { readonly error?: CloudSyncError } | undefined,
+        value: A | undefined,
+      ): Exit.Exit<A, RemoteError> =>
+        value !== undefined
+          ? Exit.succeed(value)
+          : Exit.fail(
+              remoteError(operation)(
+                item?.error ?? new Error("The cloud did not answer for this file"),
+              ),
+            )
+      const beginResolver = RequestResolver.makeGrouped<BeginUpload, string>({
+        key: (entry) => entry.request.token,
+        resolver: (entries, token) =>
+          retryTransport(
+            call("beginUpload", token, (client) =>
+              client["upload.beginMany"]({ uploads: entries.map((e) => e.request.upload) }),
+            ),
+          ).pipe(
+            Effect.match({
+              onFailure: (error) => {
+                for (const entry of entries) entry.completeUnsafe(Exit.fail(error))
+              },
+              onSuccess: (items) => {
+                for (const [index, entry] of entries.entries())
+                  entry.completeUnsafe(answer("beginUpload", items[index], items[index]?.ticket))
+              },
+            }),
+          ),
+      }).pipe(RequestResolver.setDelay(BATCH_WINDOW), RequestResolver.batchN(MAX_UPLOAD_BATCH))
+      const finalizeResolver = RequestResolver.makeGrouped<FinalizeUpload, string>({
+        key: (entry) => entry.request.token,
+        resolver: (entries, token) =>
+          retryTransport(
+            call("finalizeUpload", token, (client) =>
+              client["upload.finalizeMany"]({ uploadIds: entries.map((e) => e.request.uploadId) }),
+            ),
+          ).pipe(
+            Effect.match({
+              onFailure: (error) => {
+                for (const entry of entries) entry.completeUnsafe(Exit.fail(error))
+              },
+              onSuccess: (items) => {
+                for (const [index, entry] of entries.entries())
+                  entry.completeUnsafe(answer("finalizeUpload", items[index], items[index]?.entry))
+              },
+            }),
+          ),
+      }).pipe(RequestResolver.setDelay(BATCH_WINDOW), RequestResolver.batchN(MAX_UPLOAD_BATCH))
       const begin: RemoteShape["begin"] = (token, upload) =>
-        retryTransport(call("beginUpload", token, (client) => client["upload.begin"](upload)))
+        Effect.request(new BeginUpload({ token, upload }), beginResolver)
       const finalize: RemoteShape["finalize"] = (token, uploadId) =>
-        retryTransport(
-          call("finalizeUpload", token, (client) => client["upload.finalize"]({ uploadId })),
-        )
+        Effect.request(new FinalizeUpload({ token, uploadId }), finalizeResolver)
       // Originals stream from disk so large videos are never held in memory. Presigned S3 PUTs
       // reject chunked bodies, and node:http sends the exact Content-Length that bodyFile sets.
       const put: RemoteShape["put"] = (ticket, body) =>

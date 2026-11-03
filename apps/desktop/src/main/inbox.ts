@@ -72,7 +72,7 @@ function mimeFor(path: string): string {
   )
 }
 
-const CONCURRENCY = 6
+const CONCURRENCY = 32
 // A path is considered once it has been quiet this long, so files still being copied in are
 // not picked up mid-write. uploadOne re-checks size and mtime before uploading anyway.
 const SETTLE_MS = 1500
