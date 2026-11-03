@@ -14,6 +14,10 @@
       // The account ID and custom domain come from CI secrets; see docs/cloudflare/releases.md.
       // Cloudflare Access protects only the custom domain.
       "workers_dev": false,
+      // D1 and S3 are both in Singapore, but Singapore ISPs are often routed to European
+      // Cloudflare locations, where each of finalize's sequential D1/S3 calls cost ~150-600 ms.
+      // Running next to S3 pays that distance once per request instead.
+      "placement": {"region": "aws:ap-southeast-1"},
       "triggers": {"crons": ["*/5 * * * *"]},
       "vars": {"NODE_ENV":"production"},
       "d1_databases": [{"binding":"DB","database_name":"cloudsync-prod","database_id":"c6936271-9153-4d71-b636-c37f3a135ee6","migrations_dir":"../../packages/db/migrations"}]
