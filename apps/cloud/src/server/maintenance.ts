@@ -79,6 +79,13 @@ export const maintenance = Effect.gen(function* () {
         }),
       )
       .pipe(Effect.ignore)
+  // Finalize is idempotent only while its upload row exists, so finished rows are kept for a week.
+  yield* database.execute("maintenance.finishedUploads", (db) =>
+    db.run(
+      "DELETE FROM uploads WHERE id IN (SELECT id FROM uploads INDEXED BY uploads_finalized WHERE status='finalized' AND updatedAt<? LIMIT 1000)",
+      new Date(Date.now() - 7 * 24 * 60 * 60_000).toISOString(),
+    ),
+  )
   const expiredArchives = yield* database.execute("maintenance.expiredArchives", (db) =>
     db.all<ArchiveRow>("SELECT * FROM archives WHERE expiresAt<? LIMIT 100", now()),
   )
